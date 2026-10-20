@@ -384,7 +384,7 @@ class LeWAM(nn.Module):
         if z_history.dim() == 4:
             z_history = z_history.flatten(1, 2)
         B, d = z_history.shape[0], self.d_model
-        tokens  = z_history.new_zeros(B, self.n_tokens, d)
+        tokens  = z_history.new_zeros(B, self.n_tokens, d, dtype=self.state_type.weight.dtype)
 
         # embed history
         state_type_embed = self.state_type.weight
