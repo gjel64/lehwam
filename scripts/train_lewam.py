@@ -29,6 +29,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, RandomSampler
 
+from lewam.models.encoders import ResNetEncoder
 from lewam.models.lewam import LeWAM, build_model
 from lewam.models.module import SIGReg
 from lewam.train.datasets import TrajectoryDataset, get_start_indices, load_frames, read_actions
@@ -202,7 +203,9 @@ def run_batch(
     loss_terms = {"act": loss_action.item(), "state": loss_state.item()}
 
     if train_cfg.w_reg > 0:
-        loss_reg = sigreg_loss(sigreg, model, z_history, state_target, z_goal, cfg.model.sigreg_grouped)
+        with torch.autocast(device, enabled=False):   # bf16 rounds the statistic and its gradient
+            loss_reg = sigreg_loss(sigreg, model, z_history.float(), state_target.float(),
+                                   None if z_goal is None else z_goal.float(), cfg.model.sigreg_grouped)
         loss = loss + train_cfg.w_reg * loss_reg
         loss_terms["reg"] = loss_reg.item()
 
@@ -212,7 +215,7 @@ def run_batch(
         loss = loss + train_cfg.w_idm * loss_idm
         loss_terms["idm"] = loss_idm.item()
     if n_states_pred:
-        loss_terms["zstd"] = state_target.reshape(-1, state_target.shape[-1]).std(0).mean().item()
+        loss_terms["zstd"] = state_target.float().reshape(-1, state_target.shape[-1]).std(0).mean().item()
 
     return loss, loss_terms, B
 
@@ -271,6 +274,10 @@ def main(cfg: DictConfig):
 
     lewam_cfg = model_config(cfg, actions.shape[1])
     model = build_model(lewam_cfg).to(device)
+    if train_cfg.compile:
+        assert isinstance(model.encoder, ResNetEncoder), "train.compile supports the resnet encoders"
+        model.encoder.trunk.compile()   # in place: the state_dict keys are unchanged
+        model.encoder.trunk_chunks = train_cfg.compile_chunks
 
     (run_dir / "lewam_config.json").write_text(
         json.dumps({**lewam_cfg, "action_mean": action_mean, "action_std": action_std}, indent=1)

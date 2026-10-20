@@ -61,6 +61,7 @@ class ResNetEncoder(Encoder):
         self.trunk = batchnorm_to_groupnorm(trunk) if group_norm else trunk
         self.kp_conv = nn.Conv2d(512, 32, kernel_size=1)
         self.crop_size = crop_size
+        self.trunk_chunks = 1   # >1: run the trunk on batch chunks (GroupNorm is per image, so the output is unchanged)
         self.build_projector(64, output_dim, proj_hidden)
 
     def crop(self, pixels: torch.Tensor) -> torch.Tensor:
@@ -81,7 +82,11 @@ class ResNetEncoder(Encoder):
         """(N, 3, H, W) -> (N, 64): the expected (x, y) image coordinate of each of 32 keypoint maps."""
         if self.crop_size:
             pixels = self.crop(pixels)
-        fmap = self.kp_conv(self.trunk(pixels))                      # (N, 32, h, w)
+        if self.trunk_chunks > 1:
+            trunk_out = torch.cat([self.trunk(chunk) for chunk in pixels.chunk(self.trunk_chunks)])
+        else:
+            trunk_out = self.trunk(pixels)
+        fmap = self.kp_conv(trunk_out)                              # (N, 32, h, w)
         N, K, H, W = fmap.shape
         attn = fmap.flatten(2).softmax(-1)                          # (N, 32, h*w)
         xs = torch.linspace(-1.0, 1.0, W, device=fmap.device)

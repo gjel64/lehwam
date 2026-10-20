@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from lewam.models.encoders import build_encoder
-from lewam.models.module import sinusoid
+from lewam.models.module import sinusoid, MLP
 
 
 class MoTBlock(nn.Module):

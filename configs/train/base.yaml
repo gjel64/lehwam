@@ -55,7 +55,9 @@ train:
   dynamics_lr: null
   weight_decay: 1.0e-4
   steps_per_epoch: 0        # cap train/val batches per epoch; 0 = one pass
-  precision: fp32           # fp32 | bf16 (autocast of the forward)
+  precision: fp32           # fp32 | bf16 (autocast of the forward; SIGReg stays fp32)
+  compile: false            # torch.compile the resnet encoder trunk (~2x with bf16 on GB10)
+  compile_chunks: 2         # compile: run the trunk on this many batch chunks; one 512-image call crashes Inductor
   encoder_checkpoint_chunks: 0   # >1: encode in this many chunks with activation checkpointing (memory)
   p_drop_goal: 0.0          # per-sample goal dropout (the goal is masked out)
   w_act: 1.0                # action (policy) loss weight
