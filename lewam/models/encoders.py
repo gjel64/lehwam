@@ -154,23 +154,24 @@ class DINOv3Encoder(Encoder):
 
 
 def build_encoder(backbone: str, output_dim: int, proj_hidden: int, size: str = "tiny", img_size: int = 224,
-                  checkpoint: str | None = None) -> Encoder:
+                  checkpoint: str | None = None, crop_size: int = 202) -> Encoder:
     """
     The image encoder for a backbone name
 
     Args:
-        backbone (str): resnet18dp (Diffusion Policy's ResNet18: GroupNorm, 202 crop) | resnet18 | vit | dinov3
+        backbone (str): resnet18dp (Diffusion Policy's ResNet18: GroupNorm, random crop) | resnet18 | vit | dinov3
         output_dim (int): latent size
         proj_hidden (int): hidden width of the projector
         size (str): ViT / DINOv3 size
         img_size (int): input image size (ViT)
         checkpoint (str | None): DINOv3 weights
+        crop_size (int): resnet18dp crop size (202 for 224px images)
 
     Returns:
         encoder (Encoder): the encoder
     """
     if backbone == "resnet18dp":
-        return ResNetEncoder(output_dim, proj_hidden, group_norm=True, crop_size=202)
+        return ResNetEncoder(output_dim, proj_hidden, group_norm=True, crop_size=crop_size)
     if backbone == "resnet18":
         return ResNetEncoder(output_dim, proj_hidden, group_norm=False, crop_size=None)
     if backbone == "vit":

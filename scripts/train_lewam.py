@@ -47,6 +47,7 @@ def model_config(cfg: DictConfig, action_raw_dim: int) -> dict:
     return dict(
         fs=cfg.data.frameskip, action_raw_dim=action_raw_dim, img_size=cfg.data.img_size,
         encoder_size=model.encoder_size, encoder_backbone=model.encoder_backbone, encoder_ckpt=None,
+        crop_size=model.crop_size,
         z_dim=model.z_dim, proj_hidden=model.proj_hidden, d_model=model.d_model, n_heads=model.n_heads,
         depth=model.depth, dropout=model.dropout, n_flow_steps=model.n_flow_steps,
         num_actions_pred=model.num_actions_pred, num_states_pred=model.num_states_pred,

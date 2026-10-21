@@ -25,6 +25,7 @@ data:
 model:
   encoder_backbone: resnet18dp
   encoder_size: tiny
+  crop_size: 202            # resnet18dp random crop; ~0.9 x data.img_size (101 for 112px)
   z_dim: 192
   proj_hidden: 384
   d_model: 192

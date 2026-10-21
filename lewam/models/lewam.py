@@ -133,6 +133,7 @@ class LeWAM(nn.Module):
             encoder_backbone (str): the architecture of the encoder (vit, resnet18, resnet18dp, dinov3)
             encoder_size (str): encoder size: vit (tiny, small, base, large), dinov3 (small, base, large)
             encoder_ckpt (str): encoder_backbone=dinov3: weights to load (None downloads timm's)
+            crop_size (int): encoder_backbone=resnet18dp: random crop size (202 for 224px images)
             proj_hidden (int): the hidden layer size of the encoder's projection MLP
 
             sigreg_proj_dim (int): if > 0, the latent state is projected to this dim before SIGReg
@@ -181,7 +182,7 @@ class LeWAM(nn.Module):
         # encoder
         self.encoder = build_encoder(
             cfg["encoder_backbone"], self.z_dim, cfg["proj_hidden"], size=cfg["encoder_size"],
-            img_size=cfg["img_size"], checkpoint=cfg.get("encoder_ckpt")
+            img_size=cfg["img_size"], checkpoint=cfg.get("encoder_ckpt"), crop_size=cfg["crop_size"]
         )
 
         # state embeddings
@@ -600,7 +601,7 @@ class LeWAM(nn.Module):
 
 def build_model(cfg: dict) -> LeWAM:
     defaults = dict(
-        encoder_backbone="resnet18dp", encoder_ckpt=None,
+        encoder_backbone="resnet18dp", encoder_ckpt=None, crop_size=202,
         img_size=224, z_dim=192, proj_hidden=768, d_model=192, n_heads=4, depth=4,
         dropout=0.1, n_flow_steps=8, fs=5, num_actions_pred=10, num_states_pred=1,
         history_len=2, goal_type="none", state_head="mse",

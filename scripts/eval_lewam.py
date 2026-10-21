@@ -97,6 +97,8 @@ def main(cfg: DictConfig):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, model_cfg = load_lewam(cfg.policy, which=cfg.seq_which)
     model = model.to(device).eval().requires_grad_(False)
+    assert eval_cfg.img_size == model_cfg.get("img_size", 224), \
+        f"eval.img_size={eval_cfg.img_size} but {cfg.policy} was trained on {model_cfg.get('img_size', 224)}px images"
     transform = {"pixels": img_transform(eval_cfg.img_size), "goal": img_transform(eval_cfg.img_size)}
     policy = build_policy(eval_cfg, model, model_cfg, cfg.seed, transform, goal_offsets)
     print(f"[eval] eval mode={eval_cfg.mode} policy={type(policy).__name__}")
