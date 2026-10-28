@@ -113,6 +113,10 @@ class LeWAMPlanner(LeWAMPolicy):
         z_goal = z_goal[:, None] if z_goal.dim() == 2 else z_goal
         return ((z_at_goal[:, self.goal_view_indices] - z_goal) ** 2).mean(-1).mean(-1)
 
+    def _plan_cost(self, latents_per_step: torch.Tensor, z_goal: torch.Tensor, steps_to_goal: torch.Tensor | None) -> torch.Tensor:
+        """Planning cost of imagined latents (rows, steps, z) or (rows, steps, views, z): the goal cost at each row's goal step."""
+        return self._goal_cost(self._pred_state_at(latents_per_step, self._goal_step_idx(steps_to_goal)), z_goal)
+
     def _propose(self, info_dict: dict, replan: list[int], history: torch.Tensor, history_pad: torch.Tensor) -> torch.Tensor:
         """The actions to execute for each replanning env; called by LeWAMPolicy.get_action at every replan."""
         z_goal = self._goal_latents(info_dict, replan)
@@ -202,7 +206,7 @@ class LeWAMPlanner(LeWAMPolicy):
 
         Returns:
             actions (torch.Tensor): (R * num_proposals, n_dyn_steps, frameskip, action_dim) the actions of each step
-            state_at_goal (torch.Tensor): (R * num_proposals, z) or (..., views, z) the imagined state at the goal
+            cost (torch.Tensor): (R * num_proposals,) the planning cost of each proposal
         """
         num_rows = history.shape[0]
         actions_given = candidate_actions is not None
@@ -228,8 +232,7 @@ class LeWAMPlanner(LeWAMPolicy):
             latents_per_step.append(next_latent.squeeze(-2))
             history, history_pad = self._slide_history(history, history_pad, next_latent)
 
-        state_at_goal = self._pred_state_at(torch.stack(latents_per_step, 1), self._goal_step_idx(steps_to_goal))
-        return torch.stack(actions_per_step, 1), state_at_goal
+        return torch.stack(actions_per_step, 1), self._plan_cost(torch.stack(latents_per_step, 1), z_goal, steps_to_goal)
 
     def _steer_rollout(self, history: torch.Tensor, history_pad: torch.Tensor, z_goal: torch.Tensor, steps_to_goal: torch.Tensor | None) -> torch.Tensor:
         """SteerMPC over the replanning envs."""
@@ -357,8 +360,7 @@ class LeWAMPlanner(LeWAMPolicy):
             next_latent = self._next_latent(pred_states)
             latents_per_step.append(next_latent.squeeze(-2))
             history, history_pad = self._slide_history(history, history_pad, next_latent)
-        state_at_goal = self._pred_state_at(torch.stack(latents_per_step, 1), self._goal_step_idx(steps_to_goal))
-        return self._goal_cost(state_at_goal, z_goal)
+        return self._plan_cost(torch.stack(latents_per_step, 1), z_goal, steps_to_goal)
 
     def _gradient_plan(
         self, history: torch.Tensor, history_pad: torch.Tensor, z_goal: torch.Tensor, steps_to_goal: torch.Tensor | None
@@ -372,8 +374,8 @@ class LeWAMPlanner(LeWAMPolicy):
             pad_rep = history_pad.repeat_interleave(num_proposals, 0)
             goal_rep = z_goal.repeat_interleave(num_proposals, 0)
             steps_rep = steps_to_goal.repeat_interleave(num_proposals, 0) if steps_to_goal is not None else None
-            rollout_actions, state_at_goal = self._imagine_rollout(history_rep, pad_rep, goal_rep, steps_rep)
-            rollout_cost = self._goal_cost(state_at_goal, goal_rep).view(n_envs, num_proposals)
+            rollout_actions, rollout_cost = self._imagine_rollout(history_rep, pad_rep, goal_rep, steps_rep)
+            rollout_cost = rollout_cost.view(n_envs, num_proposals)
             cheapest = rollout_cost.argmin(1)
             rollout_plans = rollout_actions.view(n_envs, num_proposals, rollout_actions.shape[1], fs, -1)
             warm_plan = rollout_plans[env_rows, cheapest].detach()
@@ -448,8 +450,8 @@ class LeWAMPlanner(LeWAMPolicy):
         
         with torch.no_grad():
             if self.cem_init == "policy":
-                rollout_actions, state_at_goal = self._imagine_rollout(history_rep, pad_rep, goal_rep, steps_rep)
-                rollout_cost = self._goal_cost(state_at_goal, goal_rep).view(n_envs, num_proposals)
+                rollout_actions, rollout_cost = self._imagine_rollout(history_rep, pad_rep, goal_rep, steps_rep)
+                rollout_cost = rollout_cost.view(n_envs, num_proposals)
                 cheapest = rollout_cost.argmin(1)
                 mean = rollout_actions.view(n_envs, num_proposals, rollout_actions.shape[1], fs, action_dim)[env_rows, cheapest].clone()
                 best_plan, best_cost = mean.clone(), rollout_cost[env_rows, cheapest].clone()
@@ -469,9 +471,9 @@ class LeWAMPlanner(LeWAMPolicy):
                 candidates = mean[:, None] + std[:, None] * torch.randn(n_envs, num_proposals, rollout_steps, fs, action_dim,
                                                                         device=self.device, generator=self._flow_generator(self.device))
                 candidates[:, 0] = mean
-                _, state_at_goal = self._imagine_rollout(history_rep, pad_rep, goal_rep, steps_rep,
-                                                         candidate_actions=candidates.reshape(n_envs * num_proposals, rollout_steps, fs, action_dim))
-                cost = self._goal_cost(state_at_goal, goal_rep).view(n_envs, num_proposals)
+                _, cost = self._imagine_rollout(history_rep, pad_rep, goal_rep, steps_rep,
+                                                candidate_actions=candidates.reshape(n_envs * num_proposals, rollout_steps, fs, action_dim))
+                cost = cost.view(n_envs, num_proposals)
                 round_cost, round_cheapest = cost.min(1)
                 better = round_cost < best_cost
                 best_plan[better] = candidates[env_rows, round_cheapest][better]
@@ -525,8 +527,8 @@ class LeWAMPlanner(LeWAMPolicy):
                 n_envs * num_proposals, self.rollout_steps, self.frameskip, self.model.action_raw_dim,
                 device=self.device, generator=self._flow_generator(self.device)
             )
-        rollout_actions, state_at_goal = self._imagine_rollout(history_rep, pad_rep, goal_rep, steps_rep, candidate_actions=random_proposals)
-        cost = self._goal_cost(state_at_goal, goal_rep).view(n_envs, num_proposals)
+        rollout_actions, cost = self._imagine_rollout(history_rep, pad_rep, goal_rep, steps_rep, candidate_actions=random_proposals)
+        cost = cost.view(n_envs, num_proposals)
         plans = rollout_actions.reshape(n_envs, num_proposals, -1, rollout_actions.shape[-1])
 
         return plans[env_rows, cost.argmin(1)]

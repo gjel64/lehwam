@@ -1,0 +1,10 @@
+# HWAM above a goal-reaching LeWAM run, see IDEA.md section 5. Frozen base (the default):
+#   python scripts/train_lewam.py --config-name hwam dataset_path=<train h5> run_name=<run> train.init_from=<lewam run>
+# Subgoal-tuned base: add train.freeze_lewam=false hwam.subgoal_token=true train.subgoal_source=scheduled
+# Joint: train.init_from=null train.freeze_encoder=false train.freeze_lewam=false train.cache_latents=false
+defaults:
+  - gr
+  - _self_
+
+hwam:
+  enabled: true

@@ -26,7 +26,7 @@ eval:
   random_start: true        # false: start at frame 0 of the drawn episodes
   min_episode_len: 0        # draw only from episodes at least this long; 0 = no filter
 
-  mode: lewam_plan          # lewam_plan | lewam_policy
+  mode: lewam_plan          # lewam_plan | lewam_policy | lewam_hwam_plan
   h0: null                  # goal horizon at the start, in frameskip units; null = from the goal offset
   exec_actions: 0           # actions executed per replan; 0 = frameskip
 
@@ -53,3 +53,12 @@ eval:
   cem_elites: 6
   cem_std: 0.5
   cem_init: policy
+  # HWAM (mode=lewam_hwam_plan); level 0 plans with plan_mode
+  hwam_plan_mode: cem_grad  # cem | grad | cem_grad
+  hwam_num_proposals: 64
+  hwam_cem_iters: 3
+  hwam_grad_steps: 5
+  hwam_u_reg_weight: 0.1
+  hwam_warm_start: true
+  hwam_replan: every_chunk  # every_chunk | stride
+  hwam_level0_cost: consistency   # consistency | consistency_goal | goal

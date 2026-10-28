@@ -36,6 +36,7 @@ model:
   num_actions_pred: 10
   num_states_pred: 1
   action_head: flow         # flow | mse
+  action_head_init: noise   # action_head=flow: noise | mse (the flow starts at an MSE prediction plus noise)
   state_head: mse           # flow | mse
   history_len: 2
   history_stride: ???       # frames between history frames, 1..frameskip
@@ -45,6 +46,25 @@ model:
   flow_alpha_state: ${model.flow_alpha_act}
   sigreg_grouped: true      # SIGReg per latent group (history frames, state targets, goal), averaged
   sigreg_proj_dim: 0        # >0: SIGReg sees a learned z_dim -> sigreg_proj_dim projection; 0 = none
+
+hwam:                       # temporal hierarchy above LeWAM, see IDEA.md
+  enabled: false
+  num_levels: 1
+  strides: [5]              # K_l, in steps of the level below
+  dims: [128]               # latent dim of each level
+  history_len: 2
+  elevator: transformer     # transformer | mlp_window | mlp_frame
+  elevator_depth: 2
+  predictor_depth: 2
+  action_cond: latent       # latent (inferred macro-action) | actions (raw actions)
+  u_dim: 16
+  u_reg: sigreg             # sigreg | l2 | none
+  u_reg_weight: 0.1
+  infer_steps: 5
+  infer_lr: 0.1
+  infer_optimizer: adam     # sgd | adam
+  infer_grad: detach        # detach | last_step | unroll
+  subgoal_token: false      # the LeWAM policy also takes the next level-1 latent as a subgoal
 
 train:
   epochs: ???
@@ -66,3 +86,15 @@ train:
   w_reg: 0.04               # SIGReg weight
   w_idm: 0.0                # inverse-dynamics auxiliary weight
   zstd_floor: 0.005         # stop when the val state-latent std drops below this after epoch 5; 0 = off
+  # HWAM (hwam.enabled): the three ways to train are combinations of these keys, see configs/train/hwam.yaml
+  init_from: null           # run name: start from its lewam_best.pt
+  freeze_encoder: true
+  freeze_lewam: true        # true: no LeWAM loss, only the levels above train
+  cache_latents: true       # encode the dataset once with the frozen encoder
+  w_hwam: 1.0
+  hwam_warmup_epochs: 0     # linear warmup of w_hwam
+  subgoal_source: hindsight # hindsight | generated | scheduled
+  hwam_schedule: sigmoid    # subgoal_source=scheduled: constant | linear | sigmoid
+  lam_max: 0.8
+  lam_center: 0.5
+  lam_sharpness: 10.0

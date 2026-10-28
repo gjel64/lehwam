@@ -65,6 +65,7 @@ class LeWAMPolicy(BasePolicy):
 
         self.history_len = int(cfg["history_len"])
         self.history_stride = int(cfg["history_stride"])
+        self.latent_window = (self.history_len - 1) * self.history_stride   # env steps of frames and latents kept
         self.num_actions_pred = int(cfg["num_actions_pred"])
         self.num_exec_actions = int(num_exec_actions) or self.frameskip
         assert 0 < self.num_exec_actions <= self.num_actions_pred, \
@@ -137,22 +138,16 @@ class LeWAMPolicy(BasePolicy):
                 curr = info_dict[key][alive]
                 frames.append(curr[:, -1] if curr.ndim == 5 else curr)
             c_obs = torch.stack(frames, dim=1)                                 # (R, views, C, H, W)
-            window = (hist_len - 1) * self.history_stride
             for row, i in enumerate(alive):
                 step = int(self._step[i])
                 self._frames[i][step] = c_obs[row]
-                self._frames[i] = {s: f for s, f in self._frames[i].items() if s >= step - window}
-                self._latents[i] = {s: z for s, z in self._latents[i].items() if s >= step - window}
+                self._frames[i] = {s: f for s, f in self._frames[i].items() if s >= step - self.latent_window}
+                self._latents[i] = {s: z for s, z in self._latents[i].items() if s >= step - self.latent_window}
 
         if replan:
             history_rows = {i: [s for s in history_steps(int(self._step[i]), hist_len, self.history_stride) if s >= 0]
                             for i in replan}
-            missing_latents = [(i, s) for i in replan for s in history_rows[i] if s not in self._latents[i]]
-            if missing_latents:
-                pixels = torch.stack([self._frames[i][s] for i, s in missing_latents])            # (M, views, C, H, W)
-                latents = self._enc(pixels.flatten(0, 1).to(self.device).float()).view(len(missing_latents), n_views, -1)
-                for (i, s), z in zip(missing_latents, latents):
-                    self._latents[i][s] = z
+            self._encode_missing([(i, s) for i in replan for s in history_rows[i]])
 
             R, D = len(replan), self.model.z_dim
             history = torch.zeros(R, n_views, hist_len, D, device=self.device)
@@ -176,6 +171,15 @@ class LeWAMPolicy(BasePolicy):
                 action[i] = self._action_buffer[i].popleft()
                 self._step[i] += 1
         return action.reshape(*self.env.action_space.shape).float().numpy()
+
+    def _encode_missing(self, env_steps: list[tuple[int, int]]) -> None:
+        """Encode the frames of the (env, episode step) pairs that have no latent yet"""
+        missing_latents = [(i, s) for i, s in dict.fromkeys(env_steps) if s not in self._latents[i]]
+        if missing_latents:
+            pixels = torch.stack([self._frames[i][s] for i, s in missing_latents])            # (M, views, C, H, W)
+            latents = self._enc(pixels.flatten(0, 1).to(self.device).float()).view(len(missing_latents), len(self.view_keys), -1)
+            for (i, s), z in zip(missing_latents, latents):
+                self._latents[i][s] = z
 
     def _flush_env(self, i: int) -> None:
         self._action_buffer[i].clear()

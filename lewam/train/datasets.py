@@ -213,6 +213,7 @@ class TrajectoryDataset(Dataset):
     - an action chunk + valid mask
     - the next state(s) every `frameskip` frames + valid mask
     - a goal frame + normalized horizon if any
+    - for HWAM, a strip of frames every `frameskip` frames around the start frame + the actions that follow it
 
     Args:
         frames: frames from `load_frames`
@@ -229,11 +230,14 @@ class TrajectoryDataset(Dataset):
         goal_type (str): "none"; "terminal" (the terminal frame, h_norm 0); or "sampled" (h ~ U[1, h_max]
             chunks ahead, clamped to the terminal frame, h_norm = h / h_max)
         h_max (int): the largest sampled goal horizon, in frameskip units
+        strip_past (int): HWAM: strip frames up to frame_start; 0 = no strip
+        strip_ahead (int): HWAM: strip frames after frame_start
     """
 
     def __init__(self, frames, actions: torch.Tensor, frame_starts: torch.Tensor, ep_starts: torch.Tensor,
                  frames_to_terminal: torch.Tensor, possible_starts: torch.Tensor, history_len: int, history_stride: int,
-                 num_actions: int, num_states: int, frameskip: int, goal_type: str, h_max: int):
+                 num_actions: int, num_states: int, frameskip: int, goal_type: str, h_max: int,
+                 strip_past: int = 0, strip_ahead: int = 0):
         assert goal_type in ("none", "terminal", "sampled"), goal_type
         self.frames = frames
         self.actions = actions
@@ -248,6 +252,8 @@ class TrajectoryDataset(Dataset):
         self.frameskip = frameskip
         self.goal_type = goal_type
         self.h_max = h_max
+        self.strip_past = strip_past
+        self.strip_ahead = strip_ahead
 
     def __len__(self) -> int:
         return self.possible_starts.numel()
@@ -263,15 +269,20 @@ class TrajectoryDataset(Dataset):
             next_state_valid (torch.Tensor): (num_states,) 0 past the terminal frame
             goal_frame (torch.Tensor): ([views,] 3, H, W), empty for goal_type "none"
             h_norm (torch.Tensor): () normalized goal horizon, 0 unless goal_type is "sampled"
+            strip (torch.Tensor): HWAM only: (strip_past + strip_ahead, [views,] 3, H, W) frames, oldest first
+            strip_actions (torch.Tensor): HWAM only: (strip_ahead * frameskip, action_dim) actions from frame_start
         """
         start_idx = int(self.possible_starts[idx])
         frame_start = int(self.frame_starts[start_idx])
         ep_start = int(self.ep_starts[start_idx])
         frames_to_terminal = int(self.frames_to_terminal[start_idx])
-        return (
+        sample = (
             *self._history(frame_start, ep_start), *self._action_target(frame_start, frames_to_terminal),
             *self._next_state_targets(frame_start, frames_to_terminal), *self._goal(frame_start, frames_to_terminal)
         )
+        if self.strip_past:
+            sample += self._strip(frame_start, ep_start, frames_to_terminal)
+        return sample
 
     def _history(self, frame_start: int, ep_start: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns the history frames (oldest first, repeated if the history extends past the episode's start),
@@ -312,3 +323,15 @@ class TrajectoryDataset(Dataset):
             max(1, frames_to_terminal // self.frameskip)
         )
         return self.frames[frame_start + min(h * self.frameskip, frames_to_terminal)], torch.tensor(h / self.h_max)
+
+    def _strip(self, frame_start: int, ep_start: int, frames_to_terminal: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns the frames every `frameskip` frames from strip_past - 1 before frame_start to strip_ahead after it,
+           clamped to the episode (the first and terminal frames repeat), and the actions that follow frame_start,
+           zero past the terminal frame."""
+        offsets = range(-(self.strip_past - 1) * self.frameskip, self.strip_ahead * self.frameskip + 1, self.frameskip)
+        rows = [min(max(frame_start + o, ep_start), frame_start + frames_to_terminal) for o in offsets]
+        n_actions = self.strip_ahead * self.frameskip
+        actions = torch.zeros((n_actions, self.actions.shape[1]), dtype=torch.float32)
+        n_valid = min(n_actions, frames_to_terminal)
+        actions[:n_valid] = self.actions[frame_start:frame_start + n_valid].float()
+        return self.frames[torch.tensor(rows)], actions

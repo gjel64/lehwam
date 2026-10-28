@@ -129,6 +129,9 @@ class LeWAM(nn.Module):
             flow_alpha_state (float): if flow-matching state, controls sampling bias of flow timestep 
                 (0 < alpha < 1: higher noise, 1: uniform, > 1: cleaner samples)
             n_flow_steps (int): number of flow matching ODE integration steps
+            action_head_init (str): action_head=flow: "noise" starts the flow at noise, "mse" at an MSE
+                prediction of the chunk plus noise (one extra pass)
+            subgoal_dim (int): > 0 adds a subgoal token of this dim next to the goal, for the HWAM level-1 latent
 
             encoder_backbone (str): the architecture of the encoder (vit, resnet18, resnet18dp, dinov3)
             encoder_size (str): encoder size: vit (tiny, small, base, large), dinov3 (small, base, large)
@@ -161,6 +164,9 @@ class LeWAM(nn.Module):
         self.action_head = str(cfg.get("action_head", "flow"))
         self.flow_alpha_act = float(cfg.get("flow_alpha_act", 1.0))
         assert self.action_head in ("flow", "mse")
+        self.action_head_init = str(cfg.get("action_head_init", "noise"))
+        assert self.action_head_init in ("noise", "mse") and (self.action_head_init == "noise" or self.action_head == "flow")
+        self.subgoal_dim = int(cfg.get("subgoal_dim", 0))
         self.state_head = str(cfg.get("state_head", "flow"))
         self.flow_alpha_state = float(cfg.get("flow_alpha_state", self.flow_alpha_act))
         assert self.state_head in ("flow", "mse")
@@ -198,13 +204,15 @@ class LeWAM(nn.Module):
             self.view_pos = nn.Parameter(torch.zeros(1, self.num_views, d))
         if self.goal_cond:
             self.goal_proj = nn.Linear(self.z_dim, d)
+        if self.subgoal_dim:
+            self.subgoal_proj = nn.Linear(self.subgoal_dim, d)
 
-        self.state_type = nn.Embedding(3, d)     # 0 history, 1 next-state, 2 goal
+        self.state_type = nn.Embedding(3, d)     # 0 history, 1 next-state, 2 goal and subgoal
 
         # action embeddings
         self.action_proj = nn.Linear(self.action_raw_dim, d)
         self.action_pos_embed = nn.Parameter(torch.zeros(1, self.num_actions_pred, d))
-        if self.action_head == "mse":
+        if self.action_head == "mse" or self.action_head_init == "mse":
             self.action_query = nn.Parameter(torch.randn(1, self.num_actions_pred, d) * 0.02)
         self.action_type = nn.Embedding(2, d)    # 0 clean, 1 noisy/query
 
@@ -245,6 +253,8 @@ class LeWAM(nn.Module):
         idx["goal"] = list(range(offset, offset + len(self.goal_view_indices))) \
             if self.goal_cond else []
         offset += len(idx["goal"])
+        idx["subgoal"] = [offset] if self.subgoal_dim else []
+        offset += len(idx["subgoal"])
         idx["clean_actions"] = list(range(offset, offset + n_clean_actions))
         offset += n_clean_actions
         idx["action_slots"] = list(range(offset, offset + n_action_slots))
@@ -263,7 +273,7 @@ class LeWAM(nn.Module):
 
         # Attention map
         attends = torch.zeros(self.n_tokens, self.n_tokens, dtype=torch.bool)
-        hist, goal = idx["hist"], idx["goal"]
+        hist, goal, subgoal = idx["hist"], idx["goal"], idx["subgoal"]
         state_slots, clean_actions, action_slots = idx["state_slots"], idx["clean_actions"], idx["action_slots"]
 
         for row in hist:                        # history attends to itself
@@ -279,12 +289,16 @@ class LeWAM(nn.Module):
         for row in goal:                        # goal attends history and itself
             attends[row, hist] = True
             attends[row, goal] = True
+        for row in subgoal:                     # subgoal attends history and itself
+            attends[row, hist] = True
+            attends[row, subgoal] = True
         for i, row in enumerate(clean_actions): # clean actions attend history, and itself causally
             attends[row, hist] = True
             attends[row, clean_actions[:i + 1]] = True
-        for i, row in enumerate(action_slots):  # action slots attend history, goal, and itself causally
+        for i, row in enumerate(action_slots):  # action slots attend history, goal, subgoal, and itself causally
             attends[row, hist] = True
             attends[row, goal] = True
+            attends[row, subgoal] = True
             attends[row, action_slots[:i + 1]] = True
         self.register_buffer("attends", attends)
 
@@ -292,12 +306,15 @@ class LeWAM(nn.Module):
     def encode(self, pixels: torch.Tensor) -> torch.Tensor:
         return self.encoder(pixels)
 
-    def _build_attn_mask(self, history_pad: torch.Tensor, goal_keep: torch.Tensor | None = None) -> torch.Tensor:
+    def _build_attn_mask(
+        self, history_pad: torch.Tensor, goal_keep: torch.Tensor | None = None, drop_subgoal: bool = False
+    ) -> torch.Tensor:
         """
         Args:
             history_pad (torch.Tensor): (B, history_len) boolean tensor indicating which history
                 tokens are padded (True) and should not be attended to
             goal_keep (torch.Tensor | None): (B,) boolean tensor, False where the goal tokens should not be attended to
+            drop_subgoal (bool): the subgoal token is not attended to
 
         Returns:
            mask (torch.Tensor): (B, 1, N, N) additive attention mask
@@ -305,11 +322,12 @@ class LeWAM(nn.Module):
         B = history_pad.shape[0]
         attends = self.attends[None].expand(B, -1, -1).clone()
         drop_goal = goal_keep is not None and not bool(goal_keep.all())
-        if history_pad.any() or drop_goal:
+        if history_pad.any() or drop_goal or drop_subgoal:
             key_pad = torch.zeros(B, self.n_tokens, dtype=torch.bool, device=history_pad.device)
             key_pad[:, self.token_indices["hist"]] = history_pad.repeat(1, self.num_views)
             if drop_goal:
                 key_pad[:, self.token_indices["goal"]] = ~goal_keep[:, None]
+            key_pad[:, self.token_indices["subgoal"]] = drop_subgoal
             attends = attends & ~key_pad[:, None, :]
 
         mask = torch.zeros(B, self.n_tokens, self.n_tokens, device=history_pad.device)
@@ -337,7 +355,7 @@ class LeWAM(nn.Module):
         """Compute the conditioning for state, action slots for AdaLN
 
         Args:
-            tau_a (torch.Tensor | None): (B,) action flow time
+            tau_a (torch.Tensor | None): (B,) action flow time; None for the action queries
             tau_s (torch.Tensor | None): (B,) state flow time
             h_norm (torch.Tensor | None): (B,) normalized goal horizon; None excludes it
             goal_keep (torch.Tensor): (B,) bool, False excludes the horizon of a dropped goal
@@ -350,7 +368,7 @@ class LeWAM(nn.Module):
         """
         assert self.use_horizon or h_norm is None, f"goal_type {self.goal_type} has no horizon input"
         cond_state = self.tau_proj(sinusoid(tau_s, self.d_model)) if self.state_head == "flow" else None
-        cond_action = self.tau_proj(sinusoid(tau_a, self.d_model)) if self.action_head == "flow" else None
+        cond_action = self.tau_proj(sinusoid(tau_a, self.d_model)) if self.action_head == "flow" and tau_a is not None else None
         if self.use_horizon:
             if h_norm is None:
                 h = torch.zeros(batch_size, self.d_model, device=device)
@@ -363,20 +381,23 @@ class LeWAM(nn.Module):
         self, z_history: torch.Tensor, history_pad: torch.Tensor, clean_actions: torch.Tensor,
         noisy_actions: torch.Tensor | None, noisy_state: torch.Tensor | None,
         tau_a: torch.Tensor | None, tau_s: torch.Tensor | None, 
-        z_goal: torch.Tensor | None = None, h_norm: torch.Tensor | None = None, goal_keep: torch.Tensor | None = None
+        z_goal: torch.Tensor | None = None, h_norm: torch.Tensor | None = None, goal_keep: torch.Tensor | None = None,
+        z_subgoal: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             z_history (torch.Tensor): (B, views*history_len, z_dim) or (B, views, history_len, z_dim) history latents
             history_pad (torch.Tensor): (B, history_len) True where a history frame is padding
             clean_actions (torch.Tensor): (B, n_clean_actions, action_raw_dim) z-scored clean actions
-            noisy_actions (torch.Tensor | None): (B, num_actions_pred, action_raw_dim) action slot inputs if flow-matching
+            noisy_actions (torch.Tensor | None): (B, num_actions_pred, action_raw_dim) action slot inputs if flow-matching;
+                None uses the action queries (action_head_init=mse)
             noisy_state (torch.Tensor | None): (B, views*num_states_pred, z_dim) state slot inputs inputs if flow-matching
             tau_a (torch.Tensor | None): (B,) action flow time
             tau_s (torch.Tensor | None): (B,) state flow time
             z_goal (torch.Tensor | None): (B, z_dim) or (B, goal views, z_dim) goal latents; None excludes the goal and horizon
             h_norm (torch.Tensor | None): (B,) normalized goal horizon
             goal_keep (torch.Tensor | None): (B,) bool, False excludes that sample's goal and horizon (goal dropout)
+            z_subgoal (torch.Tensor | None): (B, subgoal_dim) subgoal latent; None excludes the subgoal
 
         Returns:
             action_pred (torch.Tensor): (B, num_actions_pred, action_raw_dim)
@@ -410,18 +431,21 @@ class LeWAM(nn.Module):
             if self.num_views > 1:
                 goal_embed = goal_embed + self.view_pos[:, self.goal_view_indices]
             tokens[:, self.token_indices["goal"]] = goal_embed + state_type_embed[2]
+        if self.subgoal_dim and z_subgoal is not None:
+            tokens[:, self.token_indices["subgoal"]] = self.subgoal_proj(z_subgoal)[:, None] + state_type_embed[2]
 
         # embed action
         action_type_embed = self.action_type.weight
         tokens[:, self.token_indices["clean_actions"]] = self.action_proj(clean_actions) + self.action_pos_embed[:, :self.n_clean_actions] + action_type_embed[0]
-        if self.action_head == "mse":
+        if self.action_head == "mse" or noisy_actions is None:
             tokens[:, self.token_indices["action_slots"]] = self.action_query.expand(B, -1, -1) + self.action_pos_embed + action_type_embed[1]
         else:
             tokens[:, self.token_indices["action_slots"]] = self.action_proj(noisy_actions) + self.action_pos_embed + action_type_embed[1]
 
         # MoT blocks (w/ conditioning)
         cond_state, cond_action = self._compute_slot_conditioning(tau_a, tau_s, h_norm, goal_keep, B, z_history.device)
-        attn_mask = self._build_attn_mask(history_pad, goal_keep if self.goal_cond else None)
+        attn_mask = self._build_attn_mask(history_pad, goal_keep if self.goal_cond else None,
+                                          drop_subgoal=bool(self.subgoal_dim) and z_subgoal is None)
         for block in self.blocks:
             tokens = block(tokens, attn_mask, self.layout, cond_state, cond_action)
         action_slot_feats = tokens[:, self.token_indices["action_slots"]]
@@ -438,7 +462,7 @@ class LeWAM(nn.Module):
     def loss(
         self, z_history: torch.Tensor, history_pad: torch.Tensor, action_target: torch.Tensor, action_valid: torch.Tensor,
         state_target: torch.Tensor, state_valid: torch.Tensor, z_goal: torch.Tensor | None = None, 
-        h_norm: torch.Tensor | None = None, goal_keep: torch.Tensor | None = None
+        h_norm: torch.Tensor | None = None, goal_keep: torch.Tensor | None = None, z_subgoal: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute state and action loss
         
@@ -452,9 +476,10 @@ class LeWAM(nn.Module):
             z_goal (torch.Tensor | None): (B, z_dim) or (B, goal views, z_dim) goal latents
             h_norm (torch.Tensor | None): (B,) normalized goal horizon
             goal_keep (torch.Tensor | None): (B,) bool, False excludes that sample's goal and horizon (goal dropout)
+            z_subgoal (torch.Tensor | None): (B, subgoal_dim) subgoal latent
 
         Returns:
-            loss_action (torch.Tensor): scalar action loss
+            loss_action (torch.Tensor): scalar action loss, with the MSE start loss for action_head_init=mse
             loss_state (torch.Tensor): scalar state loss, 0 when num_states_pred == 0
         """
         B = z_history.shape[0]
@@ -464,7 +489,6 @@ class LeWAM(nn.Module):
         if self.action_head == "flow":
             tau_a = self._sample_flow_time(B, self.flow_alpha_act, device)
             action_noise = torch.randn_like(action_target)
-            noisy_actions = torch.lerp(action_noise, action_target, tau_a[:, None, None].to(action_target.dtype))
         else:
             tau_a = action_noise = noisy_actions = None
         if self.state_head == "flow":
@@ -476,14 +500,23 @@ class LeWAM(nn.Module):
 
         # MoT forward
         clean_actions = action_target[:, :self.n_clean_actions]
+        goal = dict(z_goal=z_goal, h_norm=h_norm, goal_keep=goal_keep, z_subgoal=z_subgoal)
+        if self.action_head_init == "mse":
+            # the flow starts at the MSE prediction plus noise
+            action_start, _ = self.forward_mot(z_history, history_pad, clean_actions, None, noisy_states, None, tau_s, **goal)
+            action_noise = action_noise + action_start.detach()
+        if self.action_head == "flow":
+            noisy_actions = torch.lerp(action_noise, action_target, tau_a[:, None, None].to(action_target.dtype))
         action_pred, state_pred = self.forward_mot(z_history, history_pad, clean_actions, noisy_actions, noisy_states,
-                                                      tau_a, tau_s, z_goal, h_norm, goal_keep)
+                                                      tau_a, tau_s, **goal)
         
         # compute losses
         if self.action_head == "mse": 
             loss_action = self._masked_mse(action_pred, action_target, action_valid)
         else:
             loss_action = self._masked_mse(action_pred, action_target - action_noise, action_valid)
+        if self.action_head_init == "mse":
+            loss_action = loss_action + self._masked_mse(action_start, action_target, action_valid)
         if self.num_states_pred == 0:
             return loss_action, loss_action.new_zeros(())
         
@@ -509,7 +542,7 @@ class LeWAM(nn.Module):
     def predict_actions(
         self, z_history: torch.Tensor, history_pad: torch.Tensor, z_goal: torch.Tensor | None = None,
         h_norm: torch.Tensor | None = None, action_noise: torch.Tensor | None = None,
-        generator: torch.Generator | None = None
+        generator: torch.Generator | None = None, z_subgoal: torch.Tensor | None = None
     ) -> torch.Tensor:
         """
         Predict the next action chunk via the policy
@@ -521,6 +554,7 @@ class LeWAM(nn.Module):
             h_norm (torch.Tensor | None): (B,) normalized goal horizon
             action_noise (torch.Tensor | None): (B, num_actions_pred, action_raw_dim) initial flow noise, drawn if None
             generator (torch.Generator | None): RNG for the drawn noise
+            z_subgoal (torch.Tensor | None): (B, subgoal_dim) subgoal latent
 
         Returns:
             actions (torch.Tensor): (B, num_actions_pred, action_raw_dim) z-scored action chunk
@@ -533,14 +567,18 @@ class LeWAM(nn.Module):
         zero_state_slots = torch.zeros(B, self.n_state_tokens, self.z_dim, device=device, dtype=z_history.dtype)
         one = torch.ones(B, device=device)
 
+        goal = dict(z_goal=z_goal, h_norm=h_norm, z_subgoal=z_subgoal)
         if self.action_head == "mse":
-            actions, _ = self.forward_mot(z_history, history_pad, zero_clean_actions, None, zero_state_slots, None, one, z_goal, h_norm)
+            actions, _ = self.forward_mot(z_history, history_pad, zero_clean_actions, None, zero_state_slots, None, one, **goal)
         else:
             # ODE integration
             actions = action_noise if action_noise is not None else self.sample_action_noise(B, device, generator)
+            if self.action_head_init == "mse":
+                action_start, _ = self.forward_mot(z_history, history_pad, zero_clean_actions, None, zero_state_slots, None, one, **goal)
+                actions = actions + action_start
             for i in range(self.n_flow_steps):
                 tau = torch.full((B,), i / self.n_flow_steps, device=device)
-                v_action, _ = self.forward_mot(z_history, history_pad, zero_clean_actions, actions, zero_state_slots, tau, one, z_goal, h_norm)
+                v_action, _ = self.forward_mot(z_history, history_pad, zero_clean_actions, actions, zero_state_slots, tau, one, **goal)
                 actions = actions + v_action / self.n_flow_steps
 
         return actions

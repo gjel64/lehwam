@@ -1,16 +1,19 @@
-"""The LeWAM eval policy for `eval.mode`: lewam_policy runs it reactively, lewam_plan plans through its dynamics."""
+"""The LeWAM eval policy for `eval.mode`: lewam_policy runs it reactively, lewam_plan plans through its dynamics,
+lewam_hwam_plan plans through the HWAM levels above it."""
 
 import numpy as np
 from omegaconf import DictConfig
 
+from lewam.eval.hwam_planner import HwamPlanner
 from lewam.eval.planners import LeWAMPlanner
 from lewam.eval.policy import LeWAMPolicy
+from lewam.models.hwam import HWAM
 from lewam.models.lewam import LeWAM
 
 
 def build_policy(
     eval_cfg: DictConfig, model: LeWAM, model_cfg: dict, seed: int, transform: dict,
-    goal_offsets: list[int] | None = None
+    goal_offsets: list[int] | None = None, hwam: HWAM | None = None
 ) -> LeWAMPolicy:
     """
     Args:
@@ -20,9 +23,10 @@ def build_policy(
         seed (int): seed of the flow-matching draws
         transform (dict): per-key transforms applied to the info dict
         goal_offsets (list[int] | None): each episode's goal offset in env steps (full-trajectory protocol)
+        hwam (HWAM | None): the trained levels above LeWAM, for lewam_hwam_plan
 
     Returns:
-        policy (LeWAMPolicy): a LeWAMPolicy, or a LeWAMPlanner for lewam_plan
+        policy (LeWAMPolicy): a LeWAMPolicy, a LeWAMPlanner for lewam_plan, or a HwamPlanner for lewam_hwam_plan
     """
     frameskip = int(model_cfg["fs"])
     h0 = eval_cfg.h0
@@ -34,8 +38,21 @@ def build_policy(
 
     if eval_cfg.mode == "lewam_policy":
         return LeWAMPolicy(num_exec_actions=eval_cfg.exec_actions, **shared)
-    assert eval_cfg.mode == "lewam_plan", f"unknown eval.mode={eval_cfg.mode!r}: expected lewam_policy or lewam_plan"
-    return LeWAMPlanner(
+    assert eval_cfg.mode in ("lewam_plan", "lewam_hwam_plan"), \
+        f"unknown eval.mode={eval_cfg.mode!r}: expected lewam_policy, lewam_plan or lewam_hwam_plan"
+    if eval_cfg.mode == "lewam_hwam_plan":
+        shared.update(
+            hwam=hwam,
+            hwam_plan_mode=eval_cfg.hwam_plan_mode,
+            hwam_num_proposals=eval_cfg.hwam_num_proposals,
+            hwam_cem_iters=eval_cfg.hwam_cem_iters,
+            hwam_grad_steps=eval_cfg.hwam_grad_steps,
+            hwam_u_reg_weight=eval_cfg.hwam_u_reg_weight,
+            hwam_warm_start=eval_cfg.hwam_warm_start,
+            hwam_replan=eval_cfg.hwam_replan,
+            hwam_level0_cost=eval_cfg.hwam_level0_cost)
+    planner = HwamPlanner if eval_cfg.mode == "lewam_hwam_plan" else LeWAMPlanner
+    return planner(
         plan_mode=eval_cfg.plan_mode,
         num_proposals=eval_cfg.num_proposals,
         rollout_steps=eval_cfg.rollout_steps,

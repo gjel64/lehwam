@@ -8,6 +8,7 @@ Runs are configured under configs/eval/base.yaml and the respective task config,
 Gradient planning is the default, with 5 Adam updates per replan.
 eval.mode=lewam_policy explicitly selects direct policy execution.
 eval.mode=lewam_plan plans through the dynamics with eval.plan_mode.
+eval.mode=lewam_hwam_plan plans through the HWAM levels of a run trained with hwam.enabled (eval.hwam_* keys).
 
 Check the README for more details on eval protocols and modes
 """
@@ -27,7 +28,7 @@ from omegaconf import DictConfig, OmegaConf
 from lewam import views
 from lewam.eval.build import build_policy
 from lewam.eval.episodes import get_dataset, img_transform, sample_eval_episodes
-from lewam.eval.loaders import load_lewam
+from lewam.eval.loaders import load_hwam, load_lewam
 
 # register non-standard envs
 ENV_MODULES = {
@@ -99,8 +100,11 @@ def main(cfg: DictConfig):
     model = model.to(device).eval().requires_grad_(False)
     assert eval_cfg.img_size == model_cfg.get("img_size", 224), \
         f"eval.img_size={eval_cfg.img_size} but {cfg.policy} was trained on {model_cfg.get('img_size', 224)}px images"
+    hwam = None
+    if eval_cfg.mode == "lewam_hwam_plan":
+        hwam = load_hwam(cfg.policy, model_cfg, which=cfg.seq_which).to(device).eval().requires_grad_(False)
     transform = {"pixels": img_transform(eval_cfg.img_size), "goal": img_transform(eval_cfg.img_size)}
-    policy = build_policy(eval_cfg, model, model_cfg, cfg.seed, transform, goal_offsets)
+    policy = build_policy(eval_cfg, model, model_cfg, cfg.seed, transform, goal_offsets, hwam)
     print(f"[eval] eval mode={eval_cfg.mode} policy={type(policy).__name__}")
 
     extra_views = views.extra_cameras(views.columns(model_cfg.get("views")))
