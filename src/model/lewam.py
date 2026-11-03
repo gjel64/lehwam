@@ -57,6 +57,12 @@ class leWAM(nn.Module):
         self.state_type = nn.Parameter(torch.randn(3, emb_dim))      # 0 history, 1 next state, 2 goal
         self.action_type = nn.Parameter(torch.randn(2, emb_dim))     # 0 clean, 1 noisy
 
+    def _attn_mask(self, history_pad):
+        """(19, 19) -> (B, 1, 19, 19)"""
+        mask = self.mask.expand(history_pad.shape[0], 1, 19, 19).clone()
+        mask[history_pad[:, 0], :, :, 0] = float("-inf")
+        return mask
+
     def predictor_adaptor(self, z_history, z_goal, z_next, z_action, type="full"):
         """ 
         adapt the zs to MoT by adding position, proj (z->usable_z), type
@@ -84,8 +90,7 @@ class leWAM(nn.Module):
                 return torch.cat([h, n, g], dim=1)
 
 
-
-    def forward(self, o_history, o_target, o_goal, actions, h_norm):
+    def forward(self, o_history, o_target, o_goal, actions, action_valid, h_norm, history_pad):
         """
         o_history : (B, 2, 3, 224, 224)
         o_target :  (B, 1, 3, 224, 224)
@@ -121,15 +126,18 @@ class leWAM(nn.Module):
 
         tokens = self.predictor_adaptor(z_history, z_goal, z_next, z_action)
         
-        v_pred, z_pred = self.MoT(
-            tokens,
-            self.mask,
-            tau,
+        v_pred, z_pred = self.MoT(tokens, 
+            self._attn_mask(history_pad), 
+            tau, 
             h_norm
         ) # (B, 19, z_dim) -> (B, 10, act_dim), (B, 1, z_dim)
-        
+
+        # loss over prediction
         losses["MSE"].append(((z_pred - z_target) ** 2).mean())
-        losses["MSE"].append(((v_pred - (actions - eps)) ** 2).mean())
+
+        # loss over actions 
+        err = ((v_pred - (actions - eps)) ** 2).mean(-1) * action_valid            # (B, 10)
+        losses["MSE"].append((err.sum(-1) / action_valid.sum(-1).clamp(min=1)).mean())
 
         losses["total"] = losses["MSE"][0] + losses["MSE"][1] + (losses["SIGReg"][0] * self.sigreg_coef)
 
@@ -137,7 +145,7 @@ class leWAM(nn.Module):
 
 
     @torch.no_grad()
-    def generate(self, o_history, o_goal, h_norm):
+    def generate(self, o_history, o_goal, h_norm, history_pad=None):
         """
         o_history : (B, 2, 3, 224, 224)  2 last images spaced by 5 steps
         o_goal    : (B, 1, 3, 224, 224)  goal image
@@ -147,6 +155,9 @@ class leWAM(nn.Module):
         was_training = self.training
         self.eval()
         B = o_history.shape[0]
+        if history_pad is None:
+            history_pad = torch.zeros(B, 2, dtype=torch.bool, device=o_history.device)
+        mask = self._attn_mask(history_pad)
         
         ##### Encoder #####
         z = self.encoder.encode_im(torch.cat(([o_history, o_goal]), 1))
@@ -174,9 +185,9 @@ class leWAM(nn.Module):
             
             v_pred, _ = self.MoT(
                 tokens,
-                self.mask,
+                mask,
                 tau,
-                h_norm
+                h_norm,
             )
             x = x + v_pred / self.cfg.n_step
 

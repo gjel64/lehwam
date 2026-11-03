@@ -1,8 +1,8 @@
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1])) # project root, to import src
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from src.lewam import leWAM
+from model.lewam import leWAM
 import torch
 
 
@@ -18,10 +18,13 @@ o_target = torch.randint(0, 256, (B, 1, 3, 224, 224), dtype=torch.uint8)
 o_goal = torch.randint(0, 256, (B, 1, 3, 224, 224), dtype=torch.uint8)
 actions = torch.randn(B, 10, 2)  # (B, 10, act_dim)
 h_norm = torch.rand(B)           # chunks remaining / 10
+action_valid = torch.ones(B, 10)
+action_valid[:4, 7:] = 0 # episode ends
+history_pad = torch.zeros(B, 2, dtype=torch.bool)
+history_pad[:4, 0] = True # episode starts
 
+losses = model(o_history, o_target, o_goal, actions, action_valid, h_norm, history_pad)
+a_pred = model.generate(o_history, o_goal, h_norm, history_pad)
 
-losses = model(o_history, o_target, o_goal, actions, h_norm)
 print(losses)
-
-a_pred = model.generate(o_history, o_goal, h_norm)
 print(a_pred.shape)  # (B, 10, act_dim)
