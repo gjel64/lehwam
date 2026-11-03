@@ -6,10 +6,10 @@ import hdf5plugin
 
 
 class DatasetLeHWAM(Dataset):
-    def __init__(self, path, stride, h_max=10):
-        self.path, self.stride, self.h_max = path, stride, h_max
-        self.f = None
-        with h5py.File(path, "r") as f:
+    def __init__(self, path_h5p, path_npy, stride, h_max=10):
+        self.stride, self.h_max = stride, h_max
+        self.frames = torch.from_numpy(np.load(path_npy, mmap_mode=None))
+        with h5py.File(path_h5p, "r") as f:
             ep_len = f["ep_len"][:].reshape(-1)
             ep_off = f["ep_offset"][:].reshape(-1)
             raw_act = torch.from_numpy(f["action"][:])
@@ -20,19 +20,24 @@ class DatasetLeHWAM(Dataset):
         self.actions = ((raw_act.float() - torch.tensor(self.mean)) / torch.tensor(self.std)).half()
 
         # valids idx
-        self.starts = [(o + t, o, o + n - 1) for o, n in zip(ep_off, ep_len) for t in range(0, n - stride)]
+        frame_starts, ep_starts, frames_to_terminal = [], [], []
+        for o, n in zip(ep_off, ep_len):
+            t = np.arange(max(0, n - stride))
+            frame_starts.append(o + t)
+            ep_starts.append(np.full(t.size, o))
+            frames_to_terminal.append(n - 1 - t)
+        self.frame_starts, self.ep_starts, self.frames_to_terminal = (
+            torch.from_numpy(np.concatenate(a).astype(np.int64)) for a in (frame_starts, ep_starts, frames_to_terminal))
 
     def __len__(self):
-        return len(self.starts)
+        return self.frame_starts.numel()
 
     def __getitem__(self, i):
         """
         index -> o_history, o_target, o_goal, o_actions, actions_valid, h_norm, history_pad 
         """
-        if self.f is None:
-            self.f = h5py.File(self.path, "r") # for multiple workers
-        t, ep_start, end = self.starts[i]
-        ftt = end - t
+        t, ep_start = int(self.frame_starts[i]), int(self.ep_starts[i])
+        ftt = int(self.frames_to_terminal[i])
         pad = t - self.stride < ep_start
         t_prev = t if pad else t - self.stride
         history_pad = torch.tensor([pad, False])
@@ -45,6 +50,5 @@ class DatasetLeHWAM(Dataset):
         action_valid = torch.zeros(n_act)
         action_valid[:n_valid] = 1
 
-        frames = np.stack([self.f["pixels"][t_prev], self.f["pixels"][t], self.f["pixels"][t + self.stride], self.f["pixels"][t + h * self.stride]])
-        frames = torch.from_numpy(frames).permute(0, 3, 1, 2)           # (4, 3, H, W)
+        frames = self.frames[torch.tensor([t_prev, t, t + self.stride, t + h * self.stride])]
         return frames[:2], frames[2:3], frames[3:4], actions, action_valid, torch.tensor(h / self.h_max), history_pad
