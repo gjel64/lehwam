@@ -1,0 +1,13 @@
+data:
+  path_h5p: "data/test.h5"
+  path_npy: "data/decomp/test/pixels.npy"
+  num_workers: 8
+  ckpt_path: "checkpoints/test.pt"
+
+train:
+  batch_size: 32
+  epochs: 2
+  use_bf16: True
+
+model:
+  z_dim: 192
