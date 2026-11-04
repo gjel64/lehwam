@@ -24,7 +24,14 @@ history_pad = torch.zeros(B, 2, dtype=torch.bool)
 history_pad[:4, 0] = True # episode starts
 
 losses = model(o_history, o_target, o_goal, actions, action_valid, h_norm, history_pad)
+print(losses)
+
+model.eval()
+
+o_history = torch.randint(0, 256, (1, 2, 3, 224, 224), dtype=torch.uint8)
+o_goal = torch.randint(0, 256, (1, 1, 3, 224, 224), dtype=torch.uint8)
+h_norm = torch.rand(1)
+history_pad = torch.zeros(1, 2, dtype=torch.bool)
 a_pred = model.generate(o_history, o_goal, h_norm, history_pad)
 
-print(losses)
-print(a_pred.shape)  # (B, 10, act_dim)
+print(a_pred.shape)  # (10, act_dim)
