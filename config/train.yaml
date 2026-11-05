@@ -10,4 +10,13 @@ train:
   use_bf16: True
 
 model:
-  z_dim: 192
+  emb_dim: 192
+  sigreg_coef: 0.04
+  planning:
+    k : 32
+    n_euler_step: 8
+    n_rollout_step: 5
+    n_gd_step: 5
+    lr_for_gd: 0.05
+    lambda_prox: 0.01
+    a_max: 3.0

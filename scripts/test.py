@@ -4,9 +4,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from model.lewam import leWAM
 import torch
+from hydra import initialize, compose
 
+with initialize(config_path="../config"):
+    cfg = compose(config_name="train")
 
-model = leWAM(192, 2, torch.device("cpu"))
+model = leWAM(cfg.model, 2, torch.device("cpu"))
 
 
 # ------------------------------------------------ Fake data ------------------------------------------------

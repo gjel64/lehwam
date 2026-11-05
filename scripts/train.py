@@ -11,24 +11,29 @@ from src.model.lewam import leWAM
 
 @hydra.main(config_path="../config", config_name="train")
 def train(cfg : DictConfig):
-    model_cfg, train_cfg, data_cfg = cfg["model"], cfg["train"], cfg["data"]
-
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
+    # --- Load config
+    model_cfg, train_cfg, data_cfg = cfg["model"], cfg["train"], cfg["data"]
+
+    # --- Load dataset
     ds = DatasetLeHWAM(data_cfg.path_h5p, data_cfg.path_npy, stride=5)
     val_ds, train_ds = random_split(ds, [0.1, 0.9], generator=torch.Generator().manual_seed(42)) # first eval 10 then train 90 as in LeWAM
-
     kw = dict(batch_size=train_cfg.batch_size, num_workers=data_cfg.num_workers, pin_memory=(device =="cuda"), 
               persistent_workers=(data_cfg.num_workers != 0), prefetch_factor=4 if data_cfg.num_workers != 0 else None)
     train_loader = DataLoader(train_ds, shuffle=True, **kw)
     val_loader = DataLoader(val_ds, shuffle=False, **kw)
 
+    # --- Create model
+    model = leWAM(model_cfg, 2, device).to(device)
+
+    # --- params
     torch.backends.cudnn.benchmark = True
     autocast = partial(torch.autocast, device_type=device.type, dtype=torch.bfloat16) if train_cfg.use_bf16 else nullcontext
 
-    model = leWAM(model_cfg.z_dim, 2, device).to(device)
-
+    # ...
     # Rest of training - not working just to note
+    # ...
 
     print(f"[LOG]: Training starts ------------")
     for i in range(train_cfg.epochs):
