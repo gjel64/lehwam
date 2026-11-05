@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.optim as optim # for gradient based search
 import types
 import sys # for error message
 
@@ -48,6 +49,11 @@ class leWAM(nn.Module):
         self.cfg.K = 32
         self.cfg.n_rollout_steps = 5
 
+        self.cfg.gd_step = 5         # as in LeWAM
+        self.cfg.lr_for_gd = 0.05    # as in LeWAM
+        self.cfg.lam_prox = 0.01     # as in LeWAM
+        self.cfg.a_max = 3.0         # as in LeWAM
+
         # SIGReg
         self.sigreg = SIGReg()
         self.sigreg_coef = sigreg_coef
@@ -78,12 +84,12 @@ class leWAM(nn.Module):
         # the type is used because at generate, it calc actions everytimes but images once
         match type:
             case "full":
-                h = self.hist_proj(z_history) + self.hist_pos + self.state_type[0]
-                n = z_next + self.state_type[1]
-                g = self.goal_proj(z_goal) + self.state_type[2]
-                clean = z_action[:, :5] + self.action_pos[:, :5] + self.action_type[0]
-                noisy = z_action[:, 5:] + self.action_pos + self.action_type[1]
-                return torch.cat([h, n, g, clean, noisy], dim=1)
+                h = self.hist_proj(z_history) + self.hist_pos + self.state_type[0]     # (B, 2, z_dim)
+                n = z_next + self.state_type[1]                                        # (B, 1, z_dim)
+                g = self.goal_proj(z_goal) + self.state_type[2]                        # (B, 1, z_dim)
+                clean = z_action[:, :5] + self.action_pos[:, :5] + self.action_type[0] # (B, 5, z_dim)
+                noisy = z_action[:, 5:] + self.action_pos + self.action_type[1]        # (B, 10, z_dim)
+                return torch.cat([h, n, g, clean, noisy], dim=1)                       # (B, 19, z_dim)
             case "actions":
                 clean = z_action[:, :5] + self.action_pos[:, :5] + self.action_type[0]
                 noisy = z_action[:, 5:] + self.action_pos + self.action_type[1]
@@ -157,6 +163,7 @@ class leWAM(nn.Module):
         o_history : (B, 2, 3, 224, 224)  2 last images spaced by 5 steps
         o_goal    : (B, 1, 3, 224, 224)  goal image
         h_norm    : (B,)                 nb chunks needed to reach the goal_image
+        inference_type : "direct_policy" | "best-of-K" | "gradien_based"
         -> (B, 10, act_dim)              actions standardized (centré réduit)
         """
         was_training = self.training
@@ -177,9 +184,12 @@ class leWAM(nn.Module):
 
         match inference_type:
             case "direct_policy":
-                x = self._direct_policy(B, z_history, z_goal, z_next, mask, h_norm)
+                image_tokens = self.predictor_adaptor(z_history, z_goal, z_next, None, type="images") # (B, 4, z_dim)
+                x = self._direct_policy(B, image_tokens, mask, h_norm)
             case "best-of-K":
-                x = self._best_of_k(B, z_history, z_goal, z_next, mask, h_norm)
+                _, x = self._best_of_k(B, z_history, z_goal, z_next, mask, h_norm)
+            case "gradient_based":
+                x = self._gradient_based(B, z_history, z_goal, z_next, mask, h_norm)
             case default:
                 sys.exit('Choose one inference type')
 
@@ -191,16 +201,22 @@ class leWAM(nn.Module):
     
 # ------------------------------- Generation methods -------------------------------
 
-    def _direct_policy(self, B, z_history, z_goal, z_next, mask, h_norm):
-        x = torch.randn(B, 10, self.cfg.act_dim, device=z_history.device)
+    def _direct_policy(self, B, image_tokens, mask, h_norm):
+        """
+        we sample a random action and upgrade it with euler steps on the flow policy
+        (but not always the case https://arxiv.org/abs/2610.37891)
 
-        # do not adapts actions
-        image_tokens = self.predictor_adaptor(z_history, z_goal, z_next, None, type="images")
+        B            : batch size
+        image_tokens : (B, 4, z_dim)
+        mask         : (B, 1, 19, 19)
+        h_norm       : (B,)
+        """
+        x = torch.randn(B, 10, self.cfg.act_dim, device=mask.device)
 
         for i in range(self.cfg.n_step):
             # Prepare data for MoT
-            tau = torch.full((B,), i/self.cfg.n_step, device=z_history.device)
-            a = torch.cat([torch.full((B, 5, self.cfg.act_dim), 0, device=z_history.device), x], dim=1)
+            tau = torch.full((B,), i/self.cfg.n_step, device=mask.device)
+            a = torch.cat([torch.full((B, 5, self.cfg.act_dim), 0, device=mask.device), x], dim=1)
             z_action = self.encoder.encode_act(a)
 
             # fill only the missing part
@@ -214,46 +230,127 @@ class leWAM(nn.Module):
                 h_norm,
             )
             x = x + v_pred / self.cfg.n_step
-        return x
+        return x # (B, 10, 2)
+
+    def _rollout(self, B, z_history, z_goal, z_next, mask, h_norm, n_step):
+        """
+        it does {n_step} in latent environment, using direct_policy upgraded actions
+
+        preds         : (n_step, B, z_dim) 
+        actions       : (n_step, B, 10, act_dim)
+        """
+        preds = []
+        actions = []
+        zero_mask = self._attn_mask(torch.zeros(B, 2, dtype=torch.bool, device=z_history.device))
+        for i in range(n_step):
+            h = (h_norm - i / 10).clamp(min=0.1)
+            m = mask if i == 0 else zero_mask # passed first iter theres aren't any padding left 
+
+            image_tokens = self.predictor_adaptor(z_history, z_goal, z_next, None, "images")
+
+            x = self._direct_policy(B, image_tokens, m, h)
+
+            a_dyn = torch.cat([x[:, :5], torch.zeros_like(x)], dim=1)
+            action_tokens = self.predictor_adaptor(None, None, None, self.encoder.encode_act(a_dyn), "actions")
+            tokens = torch.cat([image_tokens, action_tokens], dim=1)
+
+            _, z_pred = self.MoT(tokens, m, torch.ones(B, device=x.device), h)
+
+            z_history = torch.cat([z_history[:, 1:], z_pred], dim=1) # (B*K, 2, z_dim)
+            actions.append(x)
+            preds.append(z_pred[:, 0])
+
+        return preds, actions
+
 
     def _best_of_k(self, B, z_history, z_goal, z_next, mask, h_norm):
         """
-        we generate K random action chunk, enhance it with Euler {n_step} times and do this {n_rollout_step} times
-        we only take the first best action  chunk
+        generate K possible actions using direct_policy and rollout to see which one is the "best of k"
         """
+        K = self.cfg.K
+        z_history = z_history.repeat_interleave(K, 0) # (B*K, 2, z_dim)
+        z_goal = z_goal.repeat_interleave(K, 0) # (B*K, 1, z_dim)
+        z_next = z_next.repeat_interleave(K, 0) # (B*K, 1, z_dim)
+        mask = mask.repeat_interleave(K, 0)
+        h_norm = h_norm.repeat_interleave(K, 0)
 
-        z_history = z_history.repeat_interleave(self.cfg.K, 0) # (B*K, 2, z_dim)
-        z_goal = z_goal.repeat_interleave(self.cfg.K, 0) # (B*K, 1, z_dim)
-        z_next = z_next.repeat_interleave(self.cfg.K, 0) # (B*K, 1, z_dim)
-        mask = mask.repeat_interleave(self.cfg.K, 0)
-        h_norm = h_norm.repeat_interleave(self.cfg.K, 0)
-        first_chunk = None
-
-        # not to to 5 step on each if we don't need (in the 3rd we only need 2 not 5)
         steps_to_goal = (h_norm * 10).round().clamp(min=1).long() # (B*K,) chunks remainings
         n_steps = int(steps_to_goal.max()) # to farthest goal
-        preds = []
 
-        for i in range(n_steps):
-    
-            h = (h_norm - i / 10).clamp(min=0.1) 
-
-            x = self._direct_policy(B*self.cfg.K, z_history, z_goal, z_next, mask, h)
-
-            if i == 0:
-                first_chunk = x
-
-            a_dyn = torch.cat([x[:, :5], torch.zeros_like(x)], dim=1)
-            tokens = self.predictor_adaptor(z_history, z_goal, z_next, self.encoder.encode_act(a_dyn), "full")
-            _, z_pred = self.MoT(tokens, mask, torch.ones(B * self.cfg.K, device=x.device), h)
-
-            preds.append(z_pred[:, 0])
-            z_history = torch.cat([z_history[:, 1:], z_pred], dim=1) # (B*K, 2, z_dim)
+        preds, actions = self._rollout(B*K, z_history, z_goal, z_next, mask, h_norm, n_steps)
+        first_action = actions[0]
 
         preds = torch.stack(preds, dim=1) # (B*K, n_steps, z_dim)
         z_at_goal = preds[torch.arange(preds.shape[0]), steps_to_goal - 1]
         cost = ((z_at_goal - z_goal[:, 0]) ** 2).mean(-1)
 
-        best = cost.view(B, self.cfg.K).argmin(1)
-        fc = first_chunk.view(B, self.cfg.K, 10, -1)
-        return fc[torch.arange(B, device=x.device), best]   # (B, 10, act_dim)
+        best = cost.view(B, K).argmin(1)
+        fc = first_action.view(B, K, 10, -1)
+        return preds, fc[torch.arange(B, device=first_action.device), best]   # (B, 10, act_dim)
+
+
+    def _gradient_based(self, B, z_history, z_goal, z_next, mask, h_norm):
+        K = self.cfg.K
+        z_history = z_history.repeat_interleave(K, 0) # (B*K, 2, z_dim)
+        z_goal = z_goal.repeat_interleave(K, 0) # (B*K, 1, z_dim)
+        z_next = z_next.repeat_interleave(K, 0) # (B*K, 1, z_dim)
+        mask = mask.repeat_interleave(K, 0)
+        h_norm = h_norm.repeat_interleave(K, 0)
+        steps_to_goal = (h_norm * 10).round().clamp(min=1).long() # (B*K,) chunks remainings
+        n_steps = int(steps_to_goal.max()) # to farthest goal
+
+        _, actions = self._rollout(B * K, z_history, z_goal, z_next, mask, h_norm, n_steps)
+        actions = torch.stack(actions, 0) # (n_step, B*K, 10, act_dim)
+
+        actions_cpy = actions.clone()
+        best_actions = actions.clone()
+        best_cost = torch.full((B * K,), float("inf"), device=actions.device)
+
+        z_hist_cpy = z_history
+        zero_mask = self._attn_mask(torch.zeros(B*K, 2, dtype=torch.bool, device=z_history.device)) 
+        optimizer = optim.Adam([actions], self.cfg.lr_for_gd)
+        cost = None 
+
+        with torch.enable_grad():
+            actions.requires_grad = True
+            for i in range(self.cfg.gd_step + 1): # 1 step further to eval
+                z_history = z_hist_cpy
+                z_pred = None
+                preds = []
+                for j in range(n_steps):
+                    h = (h_norm - j / 10).clamp(min=0.1)
+                    m = mask if j == 0 else zero_mask # passed first iter theres aren't any padding left 
+                    
+                    action = torch.cat([actions[j, :, :5], torch.zeros(B * K, 10, self.cfg.act_dim, device=actions.device)], dim=1)
+                    z_action = self.encoder.encode_act(action)
+
+                    tokens = self.predictor_adaptor(z_history, z_goal, z_next, z_action, "full")
+
+                    _, z_pred = self.MoT(tokens, m, torch.ones(B * K, device=action.device), h)
+                    preds.append(z_pred[:, 0])
+                    z_history = torch.cat([z_history[:, 1:], z_pred], dim=1)
+                
+                preds = torch.stack(preds, dim=1) # (B*K, n_steps, z_dim)
+                z_at_goal = preds[torch.arange(preds.shape[0]), steps_to_goal - 1]
+                cost = ((z_at_goal - z_goal[:, 0]) ** 2).mean(-1)
+
+                # keep the best iterate of each candidate (i = 0 is the sampled plan)
+                with torch.no_grad():
+                    better = cost < best_cost
+                    best_actions[:, better] = actions[:, better]
+                    best_cost[better] = cost[better]
+
+                if i == self.cfg.gd_step :
+                    break
+
+                loss = cost.sum() + self.cfg.lam_prox * ((actions - actions_cpy) ** 2).sum() # as in LeWAM
+                actions.grad = torch.autograd.grad(loss, actions)[0] # not to pollute model during training
+                optimizer.step()
+
+                with torch.no_grad():
+                    actions.clamp_(-self.cfg.a_max, self.cfg.a_max) # as in LeWAM
+
+        best = best_cost.view(B, K).argmin(1)
+        fc = best_actions[0].view(B, K, 10, -1)
+        return fc[torch.arange(B, device=actions.device), best]
+            
