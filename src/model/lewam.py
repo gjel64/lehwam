@@ -167,7 +167,7 @@ class leWAM(nn.Module):
         o_goal    : (B, 1, 3, 224, 224)  goal image
         h_norm    : (B,)                 nb chunks needed to reach the goal_image
         inference_type : "direct_policy" | "best-of-K" | "gradien_based"
-        -> (B, 10, act_dim)              actions standardized (centré réduit)
+        -> (B, 5*n_steps, act_dim)
         """
         was_training = self.training
         self.eval()
@@ -188,7 +188,7 @@ class leWAM(nn.Module):
         match inference_type:
             case "direct_policy":
                 image_tokens = self.predictor_adaptor(z_history, z_goal, z_next, None, type="images") # (B, 4, z_dim)
-                x = self._direct_policy(B, image_tokens, mask, h_norm)
+                x = self._direct_policy(B, image_tokens, mask, h_norm)[:, :5]
             case "best-of-K":
                 _, x = self._best_of_k(B, z_history, z_goal, z_next, mask, h_norm)
             case "gradient_based":
@@ -281,15 +281,14 @@ class leWAM(nn.Module):
         n_steps = int(steps_to_goal.max()) # to farthest goal
 
         preds, actions = self._rollout(B*K, z_history, z_goal, z_next, mask, h_norm, n_steps)
-        first_action = actions[0]
 
         preds = torch.stack(preds, dim=1) # (B*K, n_steps, z_dim)
         z_at_goal = preds[torch.arange(preds.shape[0]), steps_to_goal - 1]
         cost = ((z_at_goal - z_goal[:, 0]) ** 2).mean(-1)
 
         best = cost.view(B, K).argmin(1)
-        fc = first_action.view(B, K, 10, -1)
-        return preds, fc[torch.arange(B, device=first_action.device), best]   # (B, 10, act_dim)
+        x = torch.cat([a[:, :5] for a in actions], 1).view(B, K, 5*n_steps, -1)
+        return preds, x[torch.arange(B, device=x.device), best]   # (B, 5*n_steps, act_dim)
 
 
     def _gradient_based(self, B, z_history, z_goal, z_next, mask, h_norm):
@@ -355,6 +354,7 @@ class leWAM(nn.Module):
 
                 loss = cost.sum() + self.lambda_prox * ((actions - actions_cpy) ** 2).sum() # as in LeWAM
                 actions.grad = torch.autograd.grad(loss, actions)[0] # not to pollute model during training
+                nn.utils.clip_grad_norm_([actions], 10.0)
                 optimizer.step()
 
                 with torch.no_grad():
@@ -362,6 +362,6 @@ class leWAM(nn.Module):
 
         # select only the best of Ks
         best = best_cost.view(B, K).argmin(1)
-        fc = best_actions[0].view(B, K, 10, -1)
-        return fc[torch.arange(B, device=actions.device), best]
+        x = torch.cat([a[:, :5] for a in best_actions], 1).view(B, K, 5*n_steps, -1) 
+        return x[torch.arange(B, device=actions.device), best]
             
