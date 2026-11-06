@@ -2,12 +2,18 @@ data:
   path_h5p: "data/test.h5"
   path_npy: "data/decomp/test/pixels.npy"
   num_workers: 8
-  ckpt_path: "checkpoints/test.pt"
+  ckpt_path: "checkpoints/"
+  eval_part: 0.1 # training part = 1-eval_part
 
 train:
-  batch_size: 32
-  epochs: 2
-  use_bf16: True
+  batch_size: 128
+  epochs: 50
+  use_bf16: False
+  lr: 1.5e-4
+  seed: 42
+  warmup_epochs: 5
+  weight_decay: 1e-4
+  resume: False # if you want to start from a checkpoint
 
 model:
   emb_dim: 192

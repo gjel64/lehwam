@@ -128,7 +128,8 @@ class leWAM(nn.Module):
         z = self.encoder.encode_im(torch.cat(([o_history, o_target, o_goal]), 1)) # (B, 4, z_dim)
         z_action = self.encoder.encode_act(a)                                     # (B, 15, d) with 5 clean / 10 noisy
 
-        losses["SIGReg"].append(self.sigreg(z.transpose(0, 1)))
+        losses["SIGReg"].append(torch.stack([self.sigreg(z[:, k].unsqueeze(0)) for k in range(4)]).mean()) # To do as leWAM but replace with other later
+        # losses["SIGReg"].append(self.sigreg(z.transpose(0, 1)))
 
         ##### Predictor #####
         z_history = z[:, :2]
@@ -151,7 +152,9 @@ class leWAM(nn.Module):
         err = ((v_pred - (actions - eps)) ** 2).mean(-1) * action_valid            # (B, 10)
         losses["MSE"].append((err.sum(-1) / action_valid.sum(-1).clamp(min=1)).mean())
 
-        losses["total"] = losses["MSE"][0] + losses["MSE"][1] + (losses["SIGReg"][0] * self.sigreg_coef)
+        losses["zstd"] = z_target[:, 0].detach().std(0).mean() # to check if collapse during training
+
+        losses["total"] = losses["MSE"][0] + losses["MSE"][1] + (losses["SIGReg"][0] * self.sigreg_coef) # total loss
 
         return losses
 
