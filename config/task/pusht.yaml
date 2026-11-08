@@ -1,0 +1,14 @@
+# same as configs/eval/pusht.yaml of LeWAM
+name: "pusht"
+world:
+  env_name: "swm/PushT-v1"
+keys_to_cache: ["action", "proprio", "state"]
+goal_offset_steps: 25   # the goal is the frame 25 steps after the start
+eval_budget: 50         # nb of actions to reach it
+callables:              # set the start state and the goal state in the env
+  - method: "_set_state"
+    args:
+      state: {value: "state"}
+  - method: "_set_goal_state"
+    args:
+      goal_state: {value: "goal_state"}

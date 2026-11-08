@@ -1,0 +1,17 @@
+defaults:
+  - train        # same model/planning params as the training (needed to rebuild the ckpt)
+  - task: pusht  # config/task/*.yaml : env, goal offset, budget, callables
+  - _self_
+
+seed: 42
+
+eval:
+  ckpt: "best"                      # best | latest (in data.ckpt_path)
+  dataset_path: ${data.path_h5p}    # episodes come from the training data as in LeWAM
+  inference_type: "gradient_based"  # direct_policy | best-of-K | gradient_based
+  num_eval: 50                      # nb of episodes (= nb of envs)
+  exec_actions: 5                   # actions executed before replanning (<= 5 for direct_policy)
+  img_size: 224
+  random_start: True                # False : start at frame 0 of the episodes (long horizon protocol)
+  min_episode_len: 0                # only episodes at least this long, 0 = no filter
+  video: True

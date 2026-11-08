@@ -46,7 +46,7 @@ class DatasetLeHWAM(Dataset):
         n_act = 2 * self.stride
         n_valid = min(n_act, ftt)
         actions = torch.zeros(n_act, self.actions.shape[1])
-        actions[:n_valid] = self.actions[t:t + n_valid].float()  # actions déjà normalisées, en RAM (voir c)
+        actions[:n_valid] = self.actions[t:t + n_valid].float()
         action_valid = torch.zeros(n_act)
         action_valid[:n_valid] = 1
 

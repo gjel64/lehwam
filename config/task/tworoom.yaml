@@ -1,0 +1,14 @@
+# same as configs/eval/tworoom.yaml of LeWAM
+name: "tworoom"
+world:
+  env_name: "swm/TwoRoom-v1"
+keys_to_cache: ["action", "proprio"]
+goal_offset_steps: 100  # 20 chunks but h_norm is capped at 1 (10 chunks) as LeWAM
+eval_budget: 150
+callables:
+  - method: "_set_state"
+    args:
+      state: {value: "proprio"}
+  - method: "_set_goal_state"
+    args:
+      goal_state: {value: "goal_proprio"}

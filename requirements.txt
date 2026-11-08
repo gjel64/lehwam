@@ -1,0 +1,17 @@
+# python 3.13
+# pip install -r requirements.txt   (or uv pip install -r requirements.txt)
+
+# --- training (versions of the current machine)
+torch==2.15.0
+torchvision==0.29.2
+numpy==2.5.4
+h5py==3.16.0
+hdf5plugin==7.1.0 
+hydra-core==1.4.0rc3
+
+# --- benchmark (as LeWAM)
+stable-worldmodel==0.1.1
+pygame
+pymunk
+shapely
+imageio[ffmpeg]         # videos of the episodes (eval.video=True)
