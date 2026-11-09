@@ -193,7 +193,7 @@ class leWAM(nn.Module):
                 _, x = self._best_of_k(B, z_history, z_goal, z_next, mask, h_norm)
             case "gradient_based":
                 x = self._gradient_based(B, z_history, z_goal, z_next, mask, h_norm)
-            case default:
+            case _:
                 sys.exit('Choose one inference type')
 
 
