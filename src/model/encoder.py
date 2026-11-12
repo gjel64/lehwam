@@ -3,7 +3,7 @@ import torch.nn as nn
 import torchvision
 import torch.nn.functional as F
 
-from model.modules import MLP
+from .modules import MLP
 
 
 # ------------------------------------------------ Utils ------------------------------------------------

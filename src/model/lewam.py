@@ -15,7 +15,7 @@ class leWAM(nn.Module):
     def __init__(self, cfg, act_dim, device):
         super().__init__()
         self.encoder = Encoder(cfg.emb_dim, act_dim)
-        self.MoT = MoT(cfg.emb_dim, act_dim)
+        self.MoT = MoT(cfg.emb_dim, act_dim, cfg.n_head, 4, cfg.n_block)
 
         self.next_state_query = nn.Parameter(torch.randn(1, 1, cfg.emb_dim) * 0.02)
 

@@ -18,6 +18,9 @@ train:
 model:
   emb_dim: 192
   sigreg_coef: 0.04
+  n_head: 4
+  n_block: 4
+  dropout_p: 0.1
   planning:
     k : 32
     n_euler_step: 8
