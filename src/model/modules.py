@@ -1,7 +1,7 @@
 import torch
-import torch.nn
+import torch.nn as nn
 
-class SIGReg(torch.nn.Module):
+class SIGReg(nn.Module):
     """Sketch Isotropic Gaussian Regularizer (single-GPU!)"""
 
     def __init__(self, knots=17, num_proj=1024):
@@ -45,3 +45,31 @@ class SIGReg(torch.nn.Module):
         # (err @ self.weights)   # (T, num_proj)
         # statistic              # (T, num_proj)
         return statistic.mean()       # (1)
+
+class MLP(nn.Module):
+    def __init__(self, in_dim, out_dim, hidden_dim=None, depth=1, dropout_p=0.0, norm_fn=None):
+        """
+        l -> nb of layer (GELU + dp + Linear)
+        """
+        assert depth >= 1
+        super().__init__()
+        hidden_dim = hidden_dim if hidden_dim != None else 4*in_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+        )
+
+        for i in range(depth-1):
+            self.mlp.append(nn.GELU())
+            self.mlp.append(nn.Dropout(dropout_p))
+            self.mlp.append(nn.Linear(hidden_dim, hidden_dim))
+        # as depth >= 1
+        self.mlp.append(norm_fn(hidden_dim) if norm_fn is not None else nn.Identity())
+        self.mlp.append(nn.GELU())
+        self.mlp.append(nn.Dropout(dropout_p))
+        self.mlp.append(nn.Linear(hidden_dim, out_dim))
+        
+    def forward(self, x):
+        """
+        x: (B*T, z_dim)
+        """
+        return self.mlp(x)

@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 import torchvision
+import torch.nn.functional as F
+
+from model.modules import MLP
 
 
 # ------------------------------------------------ Utils ------------------------------------------------
@@ -91,4 +94,27 @@ class Encoder(nn.Module):
         # index into unfolded views: gathering with broadcast indices materialized ~2GB per batch
         windows = pixels.unfold(2, s, 1).unfold(3, s, 1)            # (N, C, H-s+1, W-s+1, s, s) view
         return windows[torch.arange(N, device=pixels.device), :, top, left]
-        
+
+
+
+# ------------------------------------------------ HEncoder ------------------------------------------------
+
+
+class HEncoder(nn.Module):
+    def __init__(self, emb_dim, below_dim, dropout_p, depth):
+        super().__init__()
+        self.d = emb_dim
+
+        self.mlp = MLP(below_dim, emb_dim, dropout_p=dropout_p, depth=depth, norm_fn=nn.BatchNorm1d)
+
+
+    def forward(self, token):
+        """
+        token : (B, T, below_D)
+        normally T is 1
+        """
+        B, T, _ = token.shape
+
+        x = token.flatten(0, 1) # (B*T, D_below)
+        return self.mlp(x).reshape(B, T, self.d) # (B, T, D)
+

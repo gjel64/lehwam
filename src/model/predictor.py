@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import math
 import torch.nn.functional as F
+from .modules import MLP
 
 
 # ------------------------------------------------ Utils ------------------------------------------------
@@ -42,12 +43,7 @@ class MoTBlock(nn.Module):
         [self.qkv_state, self.qkv_action] = [nn.Linear(emb_dim, 3*emb_dim) for i in range(2)]
         [self.out_state, self.out_action] = [nn.Linear(emb_dim, emb_dim) for i in range(2)]
 
-        [self.mlp_state, self.mlp_action] = [nn.Sequential(
-            nn.Linear(emb_dim, emb_dim*4),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(emb_dim*4, emb_dim)
-        ) for _ in range(2)]
+        [self.mlp_state, self.mlp_action] = [MLP(emb_dim, emb_dim, 4*emb_dim) for _ in range(2)]
 
         self.ada_fns = nn.Sequential(nn.SiLU(), nn.Linear(emb_dim, 6 * emb_dim))
 
@@ -59,8 +55,13 @@ class MoTBlock(nn.Module):
         
     def forward(self, x, mask, cond):
         """
-        x    : (B, n_token, z_dim)    n_token tokens = h0 h1 S G | a0...a4 | x0...x9
+        x    : (B, n_token, z_dim)
         mask : (B, 1, n_token, n_token)
+
+        in leWAM : token : [z_history, z_target, z_goal, z_action, z_noised_action]
+                                2           1       1        5           5
+        in leHWAM : token : [z_history, z_target, z_goal, z_action, z_noised_action, y, x]
+                                2           1       1        5           5           1  1
         """
         B, n_tokens, z_dim = x.shape 
 
@@ -106,6 +107,12 @@ class MoT(nn.Module):
         # nn.init.zeros_(self.action_out[-1].bias)
 
     def forward(self, token, mask, tau, h_norm):
+        """
+        in leWAM : token : [z_history, z_target, z_goal, z_action, z_noised_action]
+                                2           1       1        5           5
+        in leHWAM : token : [z_history, z_target, z_goal, z_action, z_noised_action, y, x]
+                                2           1       1        5           5           1  1
+        """
 
         cond = self.tau_proj(sinusoid(tau, self.emb_dim)) + self.h_proj(sinusoid(h_norm, self.emb_dim))
 
@@ -116,5 +123,4 @@ class MoT(nn.Module):
         v_pred = self.action_out(x[:, 9:19])    # flow speed
         z_pred = self.state_out(x[:, 2:3])      # ẑ_{t+5}
         return v_pred, z_pred
-
 
