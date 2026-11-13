@@ -73,3 +73,10 @@ class MLP(nn.Module):
         x: (B*T, z_dim)
         """
         return self.mlp(x)
+
+def attn_mask(history_pad, mask):
+    """(x, x) -> (B, 1, x, x)"""
+    x = mask.shape[0]
+    mask = mask.expand(history_pad.shape[0], 1, x, x).clone()
+    mask[history_pad[:, 0], :, :, 0] = float("-inf")
+    return mask

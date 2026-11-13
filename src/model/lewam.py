@@ -6,7 +6,7 @@ import sys # for error message
 
 from .encoder import Encoder
 from .predictor import MoT
-from .modules import SIGReg
+from .modules import SIGReg, attn_mask
 
 # ------------------------------------------------ LeWAM ------------------------------------------------
 
@@ -67,12 +67,6 @@ class leWAM(nn.Module):
         self.action_type = nn.Parameter(torch.randn(2, cfg.emb_dim))     # 0 clean, 1 noisy
 
 # ------------------------------- Usefull methods -------------------------------
-
-    def _attn_mask(self, history_pad):
-        """(19, 19) -> (B, 1, 19, 19)"""
-        mask = self.mask.expand(history_pad.shape[0], 1, 19, 19).clone()
-        mask[history_pad[:, 0], :, :, 0] = float("-inf")
-        return mask
 
     def predictor_adaptor(self, z_history, z_goal, z_next, z_action, type="full"):
         """ 
@@ -139,8 +133,9 @@ class leWAM(nn.Module):
 
         tokens = self.predictor_adaptor(z_history, z_goal, z_next, z_action)
         
-        v_pred, z_pred = self.MoT(tokens, 
-            self._attn_mask(history_pad), 
+        v_pred, z_pred = self.MoT(
+            tokens, 
+            attn_mask(history_pad, self.mask), 
             tau, 
             h_norm
         ) # (B, 19, z_dim) -> (B, 10, act_dim), (B, 1, z_dim)

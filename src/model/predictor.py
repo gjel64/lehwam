@@ -124,7 +124,7 @@ class MoT(nn.Module):
         n leWAM : token : [z_history, z_target, z_goal, z_action, z_noised_action]
                                 2           1       1        5           5
         in leHWAM : token : [z_t, y, next_state, x]
-                                1  1      1     1
+                              1   1      1       1
         """
 
         cond = self.tau_proj(sinusoid(tau, self.emb_dim)) + self.h_proj(sinusoid(h_norm, self.emb_dim))
