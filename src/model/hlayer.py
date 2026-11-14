@@ -6,25 +6,20 @@ from .predictor import MoT
 from .modules import SIGReg
 
 class HLayer(nn.Module):
-    def __init__(self, emb_dim, below_dim, above_dim, dropout_p, enc_depth, n_head, n_block, z_below_detach):
+    def __init__(self, cfg, emb_dim, below_dim, above_dim, device):
         """
-        emb_dim        : dim of this layer
+        emb_dim        : dim of the current layer
         below_dim      : dim of the layer below
         above_dim      : dim of the layer above
-        dropout_p      : dropout pourcentage
-        enc_depth      : encoder depth
-        n_head         : number of heads for the MoT
-        n_block        : number of MoTBock in the MoT
-        z_below_detach : if we detach z_below on encoding
         """
         super().__init__()
 
-        self.encoder = HEncoder(emb_dim, below_dim, dropout_p, enc_depth)
-        self.predictor = MoT(emb_dim, emb_dim, n_head, 3, n_block, dropout_p, True) # as for h layers there is 3 state 
+        self.encoder = HEncoder(emb_dim, below_dim, cfg.dropout_p, cfg.enc_depth)
+        self.predictor = MoT(emb_dim, emb_dim, cfg.n_head, 3, cfg.n_block, cfg.dropout_p, True) # as for h layers there is 3 state 
 
         self.next_state_query = nn.Parameter(torch.randn(1, 1, emb_dim) * 0.02)
 
-        mask = torch.ones(4, 4) * float('-inf')
+        mask = torch.ones(4, 4, device=device) * float('-inf')
         mask[:, :2] = 0
         mask[2, 2] = 0
         mask[3, 3] = 0
@@ -35,7 +30,7 @@ class HLayer(nn.Module):
         self.descender_proj = nn.Linear(above_dim, emb_dim)
         self.type_emb = nn.Parameter(torch.randn(2, emb_dim) * 0.02)  # 0: z, 1: y
         self.h_emb = nn.Linear(1, emb_dim)
-        self.z_below_detach = z_below_detach
+        self.z_below_detach = cfg.z_below_detach
 
     def forward_enc(self, z_below):
         """
@@ -56,6 +51,8 @@ class HLayer(nn.Module):
         z_next       : (B, 1, d)
         z_goal_above : (B, 1, d_above)
         h_norm       : (B)
+
+        -> v_pred, z_pred, [loss_state, loss_flow]
         """
 
         B = z.shape[0]

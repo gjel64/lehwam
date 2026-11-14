@@ -12,14 +12,15 @@ from .modules import SIGReg, attn_mask
 
 
 class leWAM(nn.Module):
-    def __init__(self, cfg, act_dim, device):
+    def __init__(self, cfg, emb_dim, act_dim, device):
         super().__init__()
-        self.encoder = Encoder(cfg.emb_dim, act_dim)
-        self.MoT = MoT(cfg.emb_dim, act_dim, cfg.n_head, 4, cfg.n_block)
+        self.encoder = Encoder(emb_dim, act_dim)
+        self.MoT = MoT(emb_dim, act_dim, cfg.n_head, 4, cfg.n_block)
 
-        self.next_state_query = nn.Parameter(torch.randn(1, 1, cfg.emb_dim) * 0.02)
+        self.next_state_query = nn.Parameter(torch.randn(1, 1, emb_dim) * 0.02)
 
         self.act_dim = act_dim
+        self.is_h = len(cfg.emb_dims) > 1 # 1 is only LeWAM
 
         # not beautiful xd
         mask = torch.ones(19, 19, device=device) * float('-inf')
@@ -59,16 +60,17 @@ class leWAM(nn.Module):
         self.sigreg_coef = cfg.sigreg_coef
 
         # MoT adaptator
-        self.hist_proj = nn.Linear(cfg.emb_dim, cfg.emb_dim)
-        self.goal_proj = nn.Linear(cfg.emb_dim, cfg.emb_dim)
-        self.hist_pos = nn.Parameter(torch.zeros(1, 2, cfg.emb_dim))     # zeros as LeWAM
-        self.action_pos = nn.Parameter(torch.zeros(1, 10, cfg.emb_dim))
-        self.state_type = nn.Parameter(torch.randn(3, cfg.emb_dim))      # 0 history, 1 next state, 2 goal
-        self.action_type = nn.Parameter(torch.randn(2, cfg.emb_dim))     # 0 clean, 1 noisy
+        self.hist_proj = nn.Linear(emb_dim, emb_dim)
+        goal_dim_res = cfg.emb_dims[1] if self.is_h else emb_dim
+        self.goal_proj = nn.Linear(goal_dim_res, emb_dim)
+        self.hist_pos = nn.Parameter(torch.zeros(1, 2, emb_dim))     # zeros as LeWAM
+        self.action_pos = nn.Parameter(torch.zeros(1, 10, emb_dim))
+        self.state_type = nn.Parameter(torch.randn(3, emb_dim))      # 0 history, 1 next state, 2 goal    the 2 = type_emb[1] if is_h
+        self.action_type = nn.Parameter(torch.randn(2, emb_dim))     # 0 clean, 1 noisy
 
 # ------------------------------- Usefull methods -------------------------------
 
-    def predictor_adaptor(self, z_history, z_goal, z_next, z_action, type="full"):
+    def predictor_adaptor(self, z_history, z_goal, z_next, z_action, type="full", tau_y=None):
         """ 
         adapt the zs to MoT by adding position, proj (z->usable_z), type
         takes the 'raw' embeddings of an encoder and adapt it to predictor
@@ -80,7 +82,10 @@ class leWAM(nn.Module):
             case "full":
                 h = self.hist_proj(z_history) + self.hist_pos + self.state_type[0]     # (B, 2, z_dim)
                 n = z_next + self.state_type[1]                                        # (B, 1, z_dim)
-                g = self.goal_proj(z_goal) + self.state_type[2]                        # (B, 1, z_dim)
+                g = self.goal_proj(z_goal)
+                if tau_y is not None:
+                    g = (1 - tau_y) * torch.randn_like(g) + tau_y * g
+                g = g + self.state_type[2]
                 clean = z_action[:, :5] + self.action_pos[:, :5] + self.action_type[0] # (B, 5, z_dim)
                 noisy = z_action[:, 5:] + self.action_pos + self.action_type[1]        # (B, 10, z_dim)
                 return torch.cat([h, n, g, clean, noisy], dim=1)                       # (B, 19, z_dim)
@@ -91,7 +96,10 @@ class leWAM(nn.Module):
             case "images":
                 h = self.hist_proj(z_history) + self.hist_pos + self.state_type[0]
                 n = z_next + self.state_type[1]
-                g = self.goal_proj(z_goal) + self.state_type[2]
+                g = self.goal_proj(z_goal)
+                if tau_y is not None:
+                    g = (1 - tau_y) * torch.randn_like(g) + tau_y * g
+                g = g + self.state_type[2]
                 return torch.cat([h, n, g], dim=1)
 
 # ------------------------------- Forward -------------------------------
@@ -153,6 +161,70 @@ class leWAM(nn.Module):
 
         return losses
 
+
+    def forward_enc(self, token, need_loss=True):
+        """
+        token = torch.cat(([o_history, o_target, o_goal]), 1)
+        partial encode : only the z as the z is needed for above level, the encoding of action will be made on forward_pre() 
+        """
+        B, T = token.shape[:2]
+
+        z = self.encoder.encode_im(token) # (B, T, z_dim)
+
+        loss = None
+        if need_loss:
+            loss = torch.stack([self.sigreg(z[:, k].unsqueeze(0)) for k in range(T)]).mean() # To do as leWAM but replace with other later
+
+        return z, loss
+
+    def forward_pre(self, z, actions, history_pad, h_norm, action_valid, z_goal_above=None):
+        """
+        do the action encoding, prediction and loss
+        """
+        B = z.shape[0]
+
+        tau = torch.rand(B, device=z.device)
+        t = tau[:, None, None]
+        eps = torch.randn_like(actions, device=z.device) 
+        x_tau = (1 - t) * eps + t * actions           # noise and true part ((1-tau) and tau)
+        a = torch.cat([actions[:, :5], x_tau], dim=1) # (B, 15, act_dim)        
+        z_action = self.encoder.encode_act(a)         # (B, 15, d) with 5 clean / 10 noisy
+
+        ##### Predictor #####
+        z_history = z[:, :2]
+        z_target = z[:, 2].unsqueeze(1) # (B, 1, z_dim) to match the shape of z_pred at mse loss
+        z_next = self.next_state_query.expand(B, 1, -1)
+        if z_goal_above is None: # if no h 
+            z_goal, tau_y = z[:, 3:4], None
+        else: # it takes the goal from above if is_h
+            z_goal = z_goal_above.detach()
+            tau_y = (0.7 + 0.3 * torch.rand(B, device=z.device))[:, None, None]
+
+        tokens = self.predictor_adaptor(
+            z_history, z_goal, z_next, z_action, 
+            tau_y=tau_y
+        )
+        
+        v_pred, z_pred = self.MoT(
+            tokens, 
+            attn_mask(history_pad, self.mask), 
+            tau, 
+            h_norm
+        ) # (B, 19, z_dim) -> (B, 10, act_dim), (B, 1, z_dim)
+
+        # loss over prediction
+        l1 = ((z_pred - z_target) ** 2).mean()
+
+        # loss over actions 
+        err = ((v_pred - (actions - eps)) ** 2).mean(-1) * action_valid            # (B, 10)
+        l2 = (err.sum(-1) / action_valid.sum(-1).clamp(min=1)).mean()
+
+        l3 = z_target[:, 0].detach().std(0).mean() # to check if collapse during training
+
+        return v_pred, z_pred, l1, l2, l3
+
+
+
 # ------------------------------- Generation -------------------------------
 
     @torch.no_grad()
@@ -169,7 +241,7 @@ class leWAM(nn.Module):
         B = o_history.shape[0]
         if history_pad is None:
             history_pad = torch.zeros(B, 2, dtype=torch.bool, device=o_history.device)
-        mask = self._attn_mask(history_pad)
+        mask = attn_mask(history_pad, self.mask)
         
         ##### Encoder #####
         z = self.encoder.encode_im(torch.cat(([o_history, o_goal]), 1))
@@ -239,7 +311,7 @@ class leWAM(nn.Module):
         """
         preds = []
         actions = []
-        zero_mask = self._attn_mask(torch.zeros(B, 2, dtype=torch.bool, device=z_history.device))
+        zero_mask = attn_mask(torch.zeros(B, 2, dtype=torch.bool, device=z_history.device), self.mask)
         for i in range(n_step):
             h = (h_norm - i / 10).clamp(min=0.1)
             m = mask if i == 0 else zero_mask # passed first iter theres aren't any padding left 
@@ -309,7 +381,7 @@ class leWAM(nn.Module):
 
         z_hist_cpy = z_history # z_history will move with doing rollout so we keep a backup
         # build a zero-padding mask because after the first step there is no padding
-        zero_mask = self._attn_mask(torch.zeros(B*K, 2, dtype=torch.bool, device=z_history.device)) 
+        zero_mask = attn_mask(torch.zeros(B*K, 2, dtype=torch.bool, device=z_history.device), self.mask) 
         optimizer = optim.Adam([actions], self.lr_for_gd)
         cost = None 
 

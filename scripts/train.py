@@ -35,7 +35,7 @@ def train(cfg : DictConfig):
     val_loader = DataLoader(val_ds, shuffle=False, **kw)
 
     # --- Create model
-    model = leWAM(model_cfg, 2, device).to(device)
+    model = leWAM(model_cfg, model_cfg.emb_dims[0], 2, device).to(device)
 
     # --- params
     torch.backends.cudnn.benchmark = True

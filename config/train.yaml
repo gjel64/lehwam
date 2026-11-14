@@ -4,6 +4,7 @@ data:
   num_workers: 8
   ckpt_path: "checkpoints/"
   eval_part: 0.1 # training part = 1-eval_part
+  Ks: [5, 25, 125]
 
 train:
   batch_size: 128
@@ -16,11 +17,13 @@ train:
   resume: False # if you want to start from a checkpoint
 
 model:
-  emb_dim: 192
+  emb_dims: [192] # it gives the number of hierachical level
   sigreg_coef: 0.04
   n_head: 4
   n_block: 4
   dropout_p: 0.1
+  enc_depth: 3 # encoder depth on
+  z_below_detach: False # !TEST! -> if True z_below is detach on encoding
   planning:
     k : 32
     n_euler_step: 8
