@@ -5,10 +5,10 @@ from .hlayer import HLayer
 from .lewam import leWAM
 
 class leHWAM(nn.Module):
-    def __init__(self, cfg, act_dim, device):
+    def __init__(self, cfg, act_dim, device, h_max=10):
         super().__init__()
 
-        self.lewam = leWAM(cfg, cfg.emb_dims[0], act_dim, device)
+        self.lewam = leWAM(cfg, cfg.emb_dims[0], act_dim, device, h_max)
 
         # Hierarchical layers
         self.hlayers = nn.ModuleList()
@@ -48,7 +48,7 @@ class leHWAM(nn.Module):
 
         _, _, l1, l2, zstd = self.lewam.forward_pre(
             zs[0][:, :4], actions, history_pad, hs[:, 0], action_valid,
-            z_goal_above=zs[1][:, 3:4]
+            z_goal_above=zs[1][:, 3:4] if n > 0 else None
         )
         mse = [l1, l2] + mse
         return {"SIGReg": [loss_sigreg], "MSE": mse, "zstd": zstd,

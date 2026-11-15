@@ -1,5 +1,5 @@
 """
-Goal-reaching benchmark of a leWAM checkpoint, same protocol as scripts/eval_lewam.py of LeWAM :
+Goal-reaching benchmark of a leHWAM checkpoint (or an old leWAM one), same protocol as scripts/eval_lewam.py of LeWAM :
     - start at a random step of an episode of the dataset, the goal is the frame {goal_offset_steps} later
     - {eval_budget} actions to reach it, replan every {exec_actions} actions
     - success = the env says the goal is reached
@@ -31,10 +31,11 @@ from stable_worldmodel.data import HDF5Dataset
 from omegaconf import DictConfig, OmegaConf
 from torchvision.transforms import v2 as transforms
 
-from src.model.lewam import leWAM
+from src.model.lehwam import leHWAM
 from src.eval.policy import LeWAMPolicy
 
-STRIDE = 5 # frameskip, as in train.py
+# defaults for the old leWAM ckpts (before leHWAM, they don't save Ks and h_max)
+OLD_KS, OLD_H_MAX = [5], 10
 
 
 # ------------------------------------------------ Utils ------------------------------------------------
@@ -94,10 +95,15 @@ def benchmark(cfg : DictConfig):
 
     # --- Load model
     s = torch.load(ROOT / cfg.data.ckpt_path / f"{eval_cfg.ckpt}.pt", map_location=device)
-    model = leWAM(cfg.model, len(s["action_mean"]), device).to(device)
-    model.load_state_dict(s["model"])
+    Ks, h_max = list(s.get("Ks", OLD_KS)), s.get("h_max", OLD_H_MAX) # same as the training
+    stride = Ks[0] # K^0, frameskip of LeWAM
+    model = leHWAM(cfg.model, len(s["action_mean"]), device, h_max).to(device)
+    if any(k.startswith("lewam.") for k in s["model"]):
+        model.load_state_dict(s["model"])
+    else: # old leWAM ckpt : its weights are the LeWAM of leHWAM
+        model.lewam.load_state_dict(s["model"])
     model.eval().requires_grad_(False) # gradient_based only needs grads on the actions
-    print(f"[LOG]: {eval_cfg.ckpt}.pt loaded (epoch {s['epoch']})")
+    print(f"[LOG]: {eval_cfg.ckpt}.pt loaded (epoch {s['epoch']}) | Ks {Ks} | h_max {h_max}")
 
     # --- Episodes (from the training data as LeWAM)
     dataset = get_dataset(ROOT / eval_cfg.dataset_path, list(task_cfg.keys_to_cache))
@@ -112,8 +118,8 @@ def benchmark(cfg : DictConfig):
     # no ToDtype/Normalize as LeWAM : our encoder takes uint8 and normalizes itself
     transform = {"pixels": transforms.Resize(eval_cfg.img_size), "goal": transforms.Resize(eval_cfg.img_size)}
     policy = LeWAMPolicy(model, s["action_mean"], s["action_std"], eval_cfg.inference_type,
-                         h0=task_cfg.goal_offset_steps / STRIDE, exec_actions=eval_cfg.exec_actions,
-                         stride=STRIDE, transform=transform)
+                         h0=task_cfg.goal_offset_steps / stride, exec_actions=eval_cfg.exec_actions,
+                         stride=stride, transform=transform)
     world.set_policy(policy)
 
     # --- Evaluation

@@ -4,7 +4,7 @@ data:
   num_workers: 8
   ckpt_path: "checkpoints/"
   eval_part: 0.1 # training part = 1-eval_part
-  Ks: [5, 25, 125]
+  Ks: [5]
 
 train:
   batch_size: 128

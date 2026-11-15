@@ -24,25 +24,31 @@ class LeWAMPolicy(BasePolicy):
         - the nb of chunks left to reach the goal (-> h_norm)
     """
 
-    def __init__(self, model, action_mean, action_std, inference_type, h0, exec_actions=5, stride=5, h_max=10, transform=None):
+    def __init__(self, model, action_mean, action_std, inference_type, h0, exec_actions=5, stride=5, transform=None):
         """
-        model          : leWAM on its device
+        model          : leHWAM (or leWAM) on its device
         action_mean    : (act_dim,) saved in the ckpt by train.py, to un-normalize the actions
         action_std     : (act_dim,)
         inference_type : "direct_policy" | "best-of-K" | "gradient_based"
         h0             : nb of chunks to reach the goal at the start (goal_offset_steps / stride)
         exec_actions   : nb of actions executed before replanning
+        stride         : K^0 (ckpt["Ks"][0])
         """
         super().__init__()
+        # the hierarchical inference (sub-goals sampled by the levels above) isn't implemented yet
+        if len(getattr(model, "hlayers", [])) > 0:
+            raise NotImplementedError("hierarchical inference not implemented yet : only a leHWAM without hlayers (Ks: [5])")
         self.type = inference_type
         self.model = model.eval()
+        self.lewam = getattr(model, "lewam", model) # leHWAM -> its LeWAM, leWAM -> itself
         self.device = next(model.parameters()).device
         self.mean = torch.tensor(action_mean, dtype=torch.float32)
         self.std = torch.tensor(action_std, dtype=torch.float32)
         self.inference_type = inference_type
         self.h0 = float(h0)
         self.exec_actions = exec_actions
-        self.stride, self.h_max = stride, h_max
+        self.stride = stride
+        self.h_max = self.lewam.h_max # same h_max as the training (K^1 / K^0, or 10 for LeWAM alone)
         self.transform = transform or {}
 
         assert exec_actions > 0, "need at least 1 action per replan"
@@ -128,7 +134,7 @@ class LeWAMPolicy(BasePolicy):
 
         o_history = torch.stack(o_history).to(self.device)                            # (R, 2, 3, H, W)
         o_goal = last_frame(info["goal"])[replan].unsqueeze(1).to(self.device)        # (R, 1, 3, H, W)
-        h_norm = np.minimum(self.chunks_left[replan], self.h_max) / self.h_max        # chunks remaining / 10 as in data.py
+        h_norm = np.minimum(self.chunks_left[replan], self.h_max) / self.h_max        # chunks remaining / h_max as in data.py
         h_norm = torch.tensor(h_norm, dtype=torch.float32, device=self.device)        # (R,)
 
-        return self.model.generate(o_history, o_goal, h_norm, history_pad.to(self.device), self.inference_type)
+        return self.lewam.generate(o_history, o_goal, h_norm, history_pad.to(self.device), self.inference_type)

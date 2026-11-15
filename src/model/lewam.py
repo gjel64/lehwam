@@ -12,7 +12,7 @@ from .modules import SIGReg, attn_mask
 
 
 class leWAM(nn.Module):
-    def __init__(self, cfg, emb_dim, act_dim, device):
+    def __init__(self, cfg, emb_dim, act_dim, device, h_max=10):
         super().__init__()
         self.encoder = Encoder(emb_dim, act_dim)
         self.MoT = MoT(emb_dim, act_dim, cfg.n_head, 4, cfg.n_block)
@@ -21,6 +21,7 @@ class leWAM(nn.Module):
 
         self.act_dim = act_dim
         self.is_h = len(cfg.emb_dims) > 1 # 1 is only LeWAM
+        self.h_max = h_max
 
         # not beautiful xd
         mask = torch.ones(19, 19, device=device) * float('-inf')
@@ -198,7 +199,10 @@ class leWAM(nn.Module):
             z_goal, tau_y = z[:, 3:4], None
         else: # it takes the goal from above if is_h
             z_goal = z_goal_above.detach()
-            tau_y = (0.7 + 0.3 * torch.rand(B, device=z.device))[:, None, None]
+            if self.training:
+                tau_y = (0.7 + 0.3 * torch.rand(B, device=z.device))[:, None, None]
+            else: 
+                tau_y = 1 # at inference always 1
 
         tokens = self.predictor_adaptor(
             z_history, z_goal, z_next, z_action, 
@@ -313,7 +317,7 @@ class leWAM(nn.Module):
         actions = []
         zero_mask = attn_mask(torch.zeros(B, 2, dtype=torch.bool, device=z_history.device), self.mask)
         for i in range(n_step):
-            h = (h_norm - i / 10).clamp(min=0.1)
+            h = (h_norm - i / self.h_max).clamp(min=0.1)
             m = mask if i == 0 else zero_mask # passed first iter theres aren't any padding left 
 
             image_tokens = self.predictor_adaptor(z_history, z_goal, z_next, None, "images")
@@ -344,7 +348,7 @@ class leWAM(nn.Module):
         mask = mask.repeat_interleave(K, 0)
         h_norm = h_norm.repeat_interleave(K, 0)
 
-        steps_to_goal = (h_norm * 10).round().clamp(min=1).long() # (B*K,) chunks remainings
+        steps_to_goal = (h_norm * self.h_max).round().clamp(min=1).long() # (B*K,) chunks remainings
         n_steps = int(steps_to_goal.max()) # to farthest goal
 
         preds, actions = self._rollout(B*K, z_history, z_goal, z_next, mask, h_norm, n_steps)
@@ -369,7 +373,7 @@ class leWAM(nn.Module):
         mask = mask.repeat_interleave(K, 0)
         h_norm = h_norm.repeat_interleave(K, 0)
 
-        steps_to_goal = (h_norm * 10).round().clamp(min=1).long() # (B*K)
+        steps_to_goal = (h_norm * self.h_max).round().clamp(min=1).long() # (B*K)
         n_steps = int(steps_to_goal.max()) # to farthest goal
 
         _, actions = self._rollout(B * K, z_history, z_goal, z_next, mask, h_norm, n_steps) # simulate {n_steps} steps
@@ -392,7 +396,7 @@ class leWAM(nn.Module):
                 z_pred = None
                 preds = [] # keep the predictions to get the cost
                 for j in range(n_steps):
-                    h = (h_norm - j / 10).clamp(min=0.1)
+                    h = (h_norm - j / self.h_max).clamp(min=0.1)
                     m = mask if j == 0 else zero_mask # passed first iter theres aren't any padding left 
 
                     # cat predicted actions to zeros, because we only need the next chunk
