@@ -32,7 +32,9 @@ class HLayer(nn.Module):
         self.h_emb = nn.Linear(1, emb_dim)
         self.z_below_detach = cfg.z_below_detach
 
-    def forward_enc(self, z_below):
+# ------------------------------ Forward ------------------------------
+
+    def forward_enc(self, z_below, need_loss=True):
         """
         z_below : (B, T, z_dim_below)
 
@@ -41,11 +43,14 @@ class HLayer(nn.Module):
         """
 
         z = self.encoder(z_below.detach() if self.z_below_detach else z_below)
+
+        if not need_loss:
+            return z, None
         loss = torch.stack([self.sigreg(z[:, k].unsqueeze(0)) for k in range(z.shape[1])]).mean()
 
         return z, loss
 
-    def forward_pre(self, z, z_next, z_goal_above, h_norm):
+    def forward_pre(self, z, z_next, z_goal_above, h_norm, need_loss=True):
         """
         z            : (B, 1, d)
         z_next       : (B, 1, d)
@@ -84,12 +89,39 @@ class HLayer(nn.Module):
         ) # (B, 4, z_dim) -> (B, 1, z_dim), (B, 1, z_dim)
 
         # ---- Losses
+        if not need_loss :
+            return v_pred, z_pred, [None, None]
+        
         loss_state = ((z_pred - z_next)**2).mean()
         loss_flow = ((v_pred - (z_next.detach() - eps_x))**2).mean()
 
         return v_pred, z_pred, [loss_state, loss_flow]
 
 
+# ------------------------------ Generation ------------------------------
+
+    def sample_subgoal(self, z, z_goal_above, h, n_step):
+        """
+        compute n_step euler step to get z_next that is the goal of the lower layer
+        z            : (B, 1, d)
+        z_goal_above : (B, 1, d_above)
+        h            : (B)
+        """
+
+        B = z.shape[0]
+        y = self.descender_proj(z_goal_above)
+        state = self.next_state_query.expand(B, 1, -1) + self.h_emb(h[:, None, None])
+
+        x = torch.randn_like(z) # what we opti (z_next)
+
+        for i in range(n_step):
+
+            tau = torch.full((B,), i / n_step, device=z.device)
+            token = torch.cat([z + self.type_emb[0], y + self.type_emb[1], state, x], 1)
+            v, _ = self.predictor(token, self.mask, tau, h)
+            x = x + v / n_step
+
+        return x
 
 
 

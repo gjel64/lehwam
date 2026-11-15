@@ -136,8 +136,8 @@ class leWAM(nn.Module):
 
         ##### Predictor #####
         z_history = z[:, :2]
-        z_target = z[:, 2].unsqueeze(1) # (B, 1, z_dim) to match the shape of z_pred at mse loss
-        z_goal = z[:, 3].unsqueeze(1)   # (B, 1, z_dim) to match the shape for the cat at the MoT input
+        z_target = z[:, 2:3]
+        z_goal = z[:, 3:4]
         z_next = self.next_state_query.expand(B, 1, -1)
 
         tokens = self.predictor_adaptor(z_history, z_goal, z_next, z_action)
@@ -180,6 +180,7 @@ class leWAM(nn.Module):
 
     def forward_pre(self, z, actions, history_pad, h_norm, action_valid, z_goal_above=None):
         """
+        z : (B, 4, d0)
         do the action encoding, prediction and loss
         """
         B = z.shape[0]
@@ -193,7 +194,7 @@ class leWAM(nn.Module):
 
         ##### Predictor #####
         z_history = z[:, :2]
-        z_target = z[:, 2].unsqueeze(1) # (B, 1, z_dim) to match the shape of z_pred at mse loss
+        z_target = z[:, 2:3]
         z_next = self.next_state_query.expand(B, 1, -1)
         if z_goal_above is None: # if no h 
             z_goal, tau_y = z[:, 3:4], None
@@ -252,7 +253,7 @@ class leWAM(nn.Module):
 
         ##### Predictor reusable data #####
         z_history = z[:, :2]
-        z_goal = z[:, 2].unsqueeze(1) # (B, 1, z_dim) to match the shape for the cat at the MoT input
+        z_goal = z[:, 2:3]  # (B, 1, z_dim)
         z_next = self.next_state_query.expand(B, 1, -1)
 
 

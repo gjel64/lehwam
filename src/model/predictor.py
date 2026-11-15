@@ -121,7 +121,7 @@ class MoT(nn.Module):
 
     def forward(self, token, mask, tau, h_norm):
         """
-        n leWAM : token : [z_history, z_target, z_goal, z_action, z_noised_action]
+        n leWAM : token : [z_history, z_next, z_goal, z_action, z_noised_action]
                                 2           1       1        5           5
         in leHWAM : token : [z_t, y, next_state, x]
                               1   1      1       1
