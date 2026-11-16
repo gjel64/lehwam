@@ -57,7 +57,7 @@ class HLayer(nn.Module):
         z_goal_above : (B, 1, d_above)
         h_norm       : (B)
 
-        -> v_pred, z_pred, [loss_state, loss_flow]
+        -> v_pred, z_pred, loss_state, loss_flow
         """
 
         B = z.shape[0]
@@ -90,12 +90,12 @@ class HLayer(nn.Module):
 
         # ---- Losses
         if not need_loss :
-            return v_pred, z_pred, [None, None]
+            return v_pred, z_pred, None, None
         
         loss_state = ((z_pred - z_next)**2).mean()
         loss_flow = ((v_pred - (z_next.detach() - eps_x))**2).mean()
 
-        return v_pred, z_pred, [loss_state, loss_flow]
+        return v_pred, z_pred, loss_state, loss_flow
 
 
 # ------------------------------ Generation ------------------------------

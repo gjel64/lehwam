@@ -97,7 +97,7 @@ def benchmark(cfg : DictConfig):
     s = torch.load(ROOT / cfg.data.ckpt_path / f"{eval_cfg.ckpt}.pt", map_location=device)
     Ks, h_max = list(s.get("Ks", OLD_KS)), s.get("h_max", OLD_H_MAX) # same as the training
     stride = Ks[0] # K^0, frameskip of LeWAM
-    model = leHWAM(cfg.model, len(s["action_mean"]), device, h_max).to(device)
+    model = leHWAM(cfg.model, len(s["action_mean"]), device, Ks, h_max).to(device)
     if any(k.startswith("lewam.") for k in s["model"]):
         model.load_state_dict(s["model"])
     else: # old leWAM ckpt : its weights are the LeWAM of leHWAM
@@ -119,7 +119,7 @@ def benchmark(cfg : DictConfig):
     transform = {"pixels": transforms.Resize(eval_cfg.img_size), "goal": transforms.Resize(eval_cfg.img_size)}
     policy = LeWAMPolicy(model, s["action_mean"], s["action_std"], eval_cfg.inference_type,
                          h0=task_cfg.goal_offset_steps / stride, exec_actions=eval_cfg.exec_actions,
-                         stride=stride, transform=transform)
+                         stride=stride, transform=transform, h_top=s.get("h_top"))
     world.set_policy(policy)
 
     # --- Evaluation
