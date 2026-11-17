@@ -363,9 +363,10 @@ class leWAM(nn.Module):
         return preds, x[torch.arange(B, device=x.device), best]   # (B, 5*n_steps, act_dim)
 
 
-    def _gradient_based(self, B, z_history, z_goal, z_next, mask, h_norm):
+    def _gradient_based(self, B, z_history, z_goal, z_next, mask, h_norm, encode_up=None):
         """
         generate K possible actions using direct_policy and optimize them {gd_step} times with gradient descent and select the best
+        encode_up : (N, d0) -> (N, d_goal), differentiable, used in leHWAM to compare the predicted z^0 with a goal of level 1
         """
         K = self.k
         z_history = z_history.repeat_interleave(K, 0) # (B*K, 2, z_dim)
@@ -412,6 +413,8 @@ class leWAM(nn.Module):
                 
                 preds = torch.stack(preds, dim=1) # (B*K, n_steps, z_dim)
                 z_at_goal = preds[torch.arange(preds.shape[0]), steps_to_goal - 1] # select last z for each B*K
+                if encode_up is not None:
+                    z_at_goal = encode_up(z_at_goal) # in the space of the goal (level 1)
                 cost = ((z_at_goal - z_goal[:, 0]) ** 2).mean(-1)
 
                 # keep the best iterate of each candidate (i = 0 is the sampled plan)

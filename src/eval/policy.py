@@ -57,7 +57,7 @@ class LeWAMPolicy(BasePolicy):
         if self.hier:
             assert len(model.hlayers) == len(self.Ks) - 1, "one hlayer per level above LeWAM"
             assert h_top is not None, "the hierarchical inference needs ckpt['h_top']"
-            assert inference_type in ("direct_policy", "persistent_direct_policy"), \
+            assert inference_type in ("direct_policy", "persistent_direct_policy", "best-of-K", "gradient_based"), \
                 f"{inference_type} not implemented for the hierarchical inference"
 
         assert exec_actions > 0, "need at least 1 action per replan"
@@ -165,12 +165,14 @@ class LeWAMPolicy(BasePolicy):
         hs = (d[:, None] / norm).clamp(max=1.0)                                       # (R, n+1)
 
         if self.subgoals is None:
-            return self.model.generate(o_history, o_goal, hs, d, history_pad, self.inference_type)
+            return self.model.generate(o_history, o_goal, hs, d, history_pad, self.inference_type,
+                                       n_predicted_steps=self.exec_actions)
 
         # sub-goals of the {R} envs -> generate (updated in place) -> back in the memory of all the envs
         idx = torch.tensor(replan, device=self.device)
         sub = {"z": [z[idx] for z in self.subgoals["z"]], "dist": self.subgoals["dist"][idx], "top": self.subgoals["top"][idx]}
-        x = self.model.generate(o_history, o_goal, hs, d, history_pad, self.inference_type, subgoals=sub)
+        x = self.model.generate(o_history, o_goal, hs, d, history_pad, self.inference_type, subgoals=sub,
+                                n_predicted_steps=self.exec_actions)
         for z, z_sub in zip(self.subgoals["z"], sub["z"]):
             z[idx] = z_sub
         self.subgoals["dist"][idx] = sub["dist"]

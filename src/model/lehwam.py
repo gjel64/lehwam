@@ -11,7 +11,9 @@ class leHWAM(nn.Module):
     def __init__(self, cfg, act_dim, device, ks, h_max=10):
         super().__init__()
 
-        self.lewam = leWAM(cfg, cfg.emb_dims[0], act_dim, device, h_max)
+        self.n = len(cfg.emb_dims) - 1
+        self.h_max = ks[1] // ks[0] if len(ks) > 1 else h_max # old LeWAM ckpts : Ks = [K^0] but emb_dims can have several levels
+        self.lewam = leWAM(cfg, cfg.emb_dims[0], act_dim, device, self.h_max)
 
         # Hierarchical layers
         self.hlayers = nn.ModuleList()
@@ -24,9 +26,13 @@ class leHWAM(nn.Module):
             )
 
         self.sigreg_coef = cfg.sigreg_coef
-        self.n_heuler_step = cfg.planning.n_heuler_step
         self.Ks = ks
         self.emb_dims = list(cfg.emb_dims)
+
+        # planning
+        self.k = cfg.planning.k
+        self.n_heuler_step = cfg.planning.n_heuler_step
+
 
 
     def forward(self, frames, actions, action_valid, hs, history_pad):
@@ -35,7 +41,6 @@ class leHWAM(nn.Module):
                 [o_t-K0, o_t, o_target_0, o_goal_0, o_target_1, o_goal_1, ... o_target_n, o_goal_n]
         hs     : (B, n+1) h of each level
         """
-        n = len(self.hlayers)
 
         # --- Up (Encoding)
         z, loss_sigreg = self.lewam.forward_enc(frames)
@@ -61,7 +66,7 @@ class leHWAM(nn.Module):
 
         _, _, l1, l2, zstd = self.lewam.forward_pre(
             zs[0][:, :4], actions, history_pad, hs[:, 0], action_valid,
-            z_goal_above=zs[1][:, 1:2] if n > 0 else None   # z_goal_0^1
+            z_goal_above=zs[1][:, 1:2] if self.n > 0 else None   # z_goal_0^1
         )
 
 
@@ -75,16 +80,18 @@ class leHWAM(nn.Module):
 # ------------------------------- Generation -------------------------------
 
     @torch.no_grad()
-    def generate(self, o_history, o_goal, hs, steps_to_goal, history_pad=None, inference_type="direct_policy", subgoals=None):
+    def generate(self, o_history, o_goal, hs, steps_to_goal, history_pad=None, inference_type="direct_policy", subgoals=None,
+                 n_predicted_steps=5):
         """
-        o_history      : (B, 2, 3, 224, 224)  2 last images spaced by K^0 steps
-        o_goal         : (B, 1, 3, 224, 224)  goal image
-        hs             : (B, n+1)             h of each level (only the one of the top level is used)
-        steps_to_goal  : (B,)                 nb of steps left to reach o_goal
-        inference_type : "direct_policy" | "persistent_direct_policy"
-        subgoals       : persistent_direct_policy only, sub-goals of the previous replan, updated in place (see empty_subgoals)
+        o_history         : (B, 2, 3, 224, 224)  2 last images spaced by K^0 steps
+        o_goal            : (B, 1, 3, 224, 224)  goal image
+        hs                : (B, n+1)             h of each level (only the one of the top level is used)
+        steps_to_goal     : (B,)                 nb of steps left to reach o_goal
+        inference_type    : "direct_policy" | "persistent_direct_policy" | "best-of-K" | "gradient_based"
+        subgoals          : persistent_direct_policy only, sub-goals of the previous replan, updated in place (see empty_subgoals)
+        n_predicted_steps : nb of step predicted by the generate (it can be less than asked)
 
-        -> (B, 5, act_dim)
+        -> (B, n_predicted_steps, act_dim)
         """
 
         was_training = self.training
@@ -95,17 +102,21 @@ class leHWAM(nn.Module):
 
         ##### Encoder Up #####
         z, _ = self.lewam.forward_enc(torch.cat([o_history, o_goal], 1), need_loss=False) # (B, 3, d0)
-        zs = [z]
-        z = z[:, 1:]   # (B, 3, d)
+        zs = [z] # (B, 3, d0)
+        z = z[:, 1:] # (B, 2, d)
         for hl in self.hlayers:
             z, _ = hl.forward_enc(z, need_loss=False)                                      # (B, 2, d_i)
             zs.append(z)
 
         match inference_type:
             case "direct_policy":
-                x = self._direct_policy(zs, hs, steps_to_goal, history_pad)[:, :5]
+                x = self._direct_policy(zs, hs, steps_to_goal, history_pad)[0][:, :n_predicted_steps]
             case "persistent_direct_policy":
-                x = self._persistent_direct_policy(zs, hs, steps_to_goal, history_pad, subgoals)[:, :5]
+                x = self._persistent_direct_policy(zs, hs, steps_to_goal, history_pad, subgoals)[:, :n_predicted_steps]
+            case "best-of-K":
+                x = self._best_of_k(zs, hs, steps_to_goal, history_pad)[:, :n_predicted_steps]
+            case "gradient_based":
+                x = self._gradient_based(zs, hs, steps_to_goal, history_pad)[:, :n_predicted_steps]
             case _:
                 sys.exit('Choose one inference type')
 
@@ -119,39 +130,39 @@ class leHWAM(nn.Module):
     def _direct_policy(self, zs, hs, steps_to_goal, history_pad):
         """
         sample z_next from noise, then to level below, and after _direct_policy from lewam
+        
+        -> (B, 5 act_dim), gs: n * (B, 1, d^n)
         """
         B = zs[0].shape[0]
-        n = len(self.hlayers)
 
         # for each traj how many layers needed (from Ks)
         needed_layer = torch.bucketize(steps_to_goal, torch.tensor(self.Ks[1:], device=zs[0].device)) # (B,)
         h_top = hs[torch.arange(B, device=zs[0].device), needed_layer]
 
-        g = zs[n][:, 1:2] if n > 0 else zs[0][:, 2:3]
+        gs = [zs[self.n][:, 1:2] if self.n > 0 else zs[0][:, 2:3]]
 
-        for k in range(n, 0, -1):
+        for k in range(self.n, 0, -1):
             g_below = zs[k][:, 1:2].clone()
             idx = torch.where(needed_layer >= k)[0] # trajs that need level k
             if idx.numel() > 0:
                 h_k = torch.where(needed_layer[idx] == k, h_top[idx], torch.ones_like(h_top[idx]))
                 g_below[idx] = self.hlayers[k-1].sample_subgoal(
-                    zs[k][idx, 0:1], g[idx], h_k, self.n_heuler_step
+                    zs[k][idx, 0:1], gs[-1][idx], h_k, self.n_heuler_step
                 )
-            g = g_below
+            gs.append(g_below)
 
         h0 = torch.where(needed_layer == 0, h_top, torch.ones_like(h_top))
         z_history = zs[0][:, :2]
         z_next = self.lewam.next_state_query.expand(B, 1, -1)
-        image_tokens = self.lewam.predictor_adaptor(z_history, g, z_next, None, type="images")
+        image_tokens = self.lewam.predictor_adaptor(z_history, gs[-1], z_next, None, type="images")
         mask = attn_mask(history_pad, self.lewam.mask)
 
-        return self.lewam._direct_policy(B, image_tokens, mask, h0)
+        return self.lewam._direct_policy(B, image_tokens, mask, h0), gs
 
         
     def empty_subgoals(self, B, device):
-        n = len(self.hlayers)
-        return {"z": [torch.zeros(B, 1, d, device=device) for d in self.emb_dims[1:n+1]],
-                "dist": torch.zeros(B, n, dtype=torch.long, device=device),
+        return {"z": [torch.zeros(B, 1, d, device=device) for d in self.emb_dims[1:self.n+1]],
+                "dist": torch.zeros(B, self.n, dtype=torch.long, device=device),
                 "top": torch.full((B,), -1, dtype=torch.long, device=device)}
 
 
@@ -161,7 +172,6 @@ class leHWAM(nn.Module):
         """
 
         B = zs[0].shape[0]
-        n = len(self.hlayers)
         dist = subgoals["dist"]
 
         needed_layer = torch.bucketize(steps_to_goal, torch.tensor(self.Ks[1:], device=zs[0].device)) # (B,)
@@ -170,16 +180,16 @@ class leHWAM(nn.Module):
         changed = subgoals["top"] != needed_layer   # (B,) goal of the current level changed -> resample below
         subgoals["top"] = needed_layer
 
-        g = zs[n][:, 1:2] if n > 0 else zs[0][:, 2:3]
+        g = zs[self.n][:, 1:2] if self.n > 0 else zs[0][:, 2:3]
 
-        for k in range(n, 0, -1):
+        for k in range(self.n, 0, -1):
             g_below = zs[k][:, 1:2].clone()                                 # final goal (if k-1 is the top level)
             used = needed_layer >= k                                        # trajs that need level k
             resample = used & (changed | (dist[:, k-1] < self.Ks[k-1]))
             idx = torch.where(resample)[0]
             if idx.numel() > 0:
                 h_k = h_top[idx]
-                if k < n: # below the top : goal^k is a kept sub-goal
+                if k < self.n: # below the top : goal^k is a kept sub-goal
                     h_k = torch.where(needed_layer[idx] == k, h_k, dist[idx, k].float() / self.Ks[k+1])
                 subgoals["z"][k-1][idx] = self.hlayers[k-1].sample_subgoal(
                     zs[k][idx, 0:1], g[idx], h_k, self.n_heuler_step
@@ -189,10 +199,67 @@ class leHWAM(nn.Module):
             changed = changed | resample
             g = g_below
 
-        h0 = h_top if n == 0 else torch.where(needed_layer == 0, h_top, dist[:, 0].float() / self.Ks[1])
+        h0 = h_top if self.n == 0 else torch.where(needed_layer == 0, h_top, dist[:, 0].float() / self.Ks[1])
         z_history = zs[0][:, :2]
         z_next = self.lewam.next_state_query.expand(B, 1, -1)
         image_tokens = self.lewam.predictor_adaptor(z_history, g, z_next, None, type="images")
         mask = attn_mask(history_pad, self.lewam.mask)
 
         return self.lewam._direct_policy(B, image_tokens, mask, h0)
+
+
+    def _best_of_k(self, zs, hs, steps_to_goal, history_pad):
+        """
+        give the goal from _direct_policy, constrcut K trajectories, select the best
+        """
+
+        B, K = zs[0].shape[0], self.k
+        dev = zs[0].device
+        _, gs = self._direct_policy(zs, hs, steps_to_goal, history_pad)
+
+        needed = torch.bucketize(steps_to_goal, torch.tensor(self.Ks[1:], device=dev))
+        h_top = hs[torch.arange(B, device=dev), needed]
+        h0 = torch.where(needed == 0, h_top, torch.ones_like(h_top))
+
+        rep = lambda t: t.repeat_interleave(K, 0)
+        z_goal, h0 = rep(gs[-1]), rep(h0)
+        mask = rep(attn_mask(history_pad, self.lewam.mask))
+        z_next = self.lewam.next_state_query.expand(B*K, 1, -1)
+        steps = (h0 * self.h_max).round().clamp(min=1).long()
+
+        preds, actions = self.lewam._rollout(B*K, rep(zs[0][:, :2]), z_goal, z_next, mask, h0, int(steps.max()))
+        z_end = torch.stack(preds, 1)[torch.arange(B*K, device=dev), steps - 1]   # (B*K, d0)
+        if self.n > 0:
+            z_end = self.hlayers[0].forward_enc(z_end[:, None], need_loss=False)[0][:, 0]
+        cost = ((z_end - z_goal[:, 0]) ** 2).mean(-1)
+
+        best = cost.view(B, K).argmin(1)
+        x = torch.cat([a[:, :5] for a in actions], 1).view(B, K, -1, self.lewam.act_dim)
+        return x[torch.arange(B, device=dev), best]
+
+
+    def _gradient_based(self, zs, hs, steps_to_goal, history_pad):
+        """
+        give the goal from _direct_policy, then LeWAM gradient based planning toward it
+        (the z^0 predicted by the rollout are encoded by E^1 to be compared with the goal of level 1)
+
+        -> (B, 5*n_steps, act_dim)
+        """
+
+        B, dev = zs[0].shape[0], zs[0].device
+        _, gs = self._direct_policy(zs, hs, steps_to_goal, history_pad)
+
+        needed = torch.bucketize(steps_to_goal, torch.tensor(self.Ks[1:], device=dev))
+        h_top = hs[torch.arange(B, device=dev), needed]
+        h0 = torch.where(needed == 0, h_top, torch.ones_like(h_top))
+
+        z_next = self.lewam.next_state_query.expand(B, 1, -1)
+        mask = attn_mask(history_pad, self.lewam.mask)
+
+        encode_up = None
+        if self.n > 0: # encoder called directly : forward_enc would detach z_below (z_below_detach) and cut the gradient
+            encode_up = lambda z: self.hlayers[0].encoder(z[:, None])[:, 0] # (N, d0) -> (N, d1)
+
+        return self.lewam._gradient_based(B, zs[0][:, :2], gs[-1], z_next, mask, h0, encode_up)
+
+
