@@ -43,14 +43,15 @@ class leHWAM(nn.Module):
         """
 
         # --- Up (Encoding)
-        z, loss_sigreg = self.lewam.forward_enc(frames)
+        z, l = self.lewam.forward_enc(frames)
+        sigreg = [l]                                    # one SIGReg per level, to see the collapse of each level
         zs = [z[:, 0:4]]                                # [z_t-K0, z_t, z_tgt_0, z_goal_0]
         z = torch.cat([z[:, 1:2], z[:, 3:]], dim=1)     # [z_t, z_goal_0, z_tgt_1, z_goal_1, ..., z_tgt_n, z_goal_n]
         for hl in self.hlayers:
             z, l = hl.forward_enc(z)                    # level k : [z_t^k, z_goal_{k-1}^k, z_tgt_k^k, z_goal_k^k, z_tgt_{k+1}^k, ...]
             zs.append(z[:, :4])                         # [z_t^k, z_goal_{k-1}^k (goal of the layer below), z_tgt_k^k, z_goal_k^k (used only at the top)]
             z = torch.cat([z[:, 0:1], z[:, 3:]], dim=1) # [z_t^k, z_goal_k^k, z_tgt_{k+1}^k, ...] -> same layout for level k+1
-            loss_sigreg = loss_sigreg + l
+            sigreg.append(l)
 
         # --- Down (Predictor) teacher forcing : layer k = n-i predicts z_tgt_k^k from z_t^k,
         #     conditioned on z_goal_k^{k+1} (the top is conditioned on its own z_goal_n^n)
@@ -71,9 +72,12 @@ class leHWAM(nn.Module):
 
 
         mse = [l1, l2] + mse
-        return {"SIGReg": [loss_sigreg], "MSE": mse, "zstd": zstd,
-                "total": sum(mse) + self.sigreg_coef * loss_sigreg}
-        # [l_wam, l_wam, l^n, l^n, l^n-1, l^n-1, ...]
+        # std over the batch of the target of each level (as LeWAM for level 0) : ~0 = collapse of this level
+        zstd = [zstd] + [zs[k][:, 2].detach().std(0).mean() for k in range(1, self.n + 1)]
+        return {"SIGReg": sigreg, "MSE": mse, "zstd": zstd,
+                "total": sum(mse) + self.sigreg_coef * sum(sigreg)}
+        # MSE          : [l_wam state, l_wam action, l^n state, l^n flow, l^n-1 state, l^n-1 flow, ...] (0, top -> down)
+        # SIGReg, zstd : [level 0, level 1, ..., level n] (bottom -> up)
 
 
 

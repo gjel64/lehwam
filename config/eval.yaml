@@ -8,10 +8,13 @@ seed: 42
 eval:
   ckpt: "best"                      # best | latest (in data.ckpt_path)
   dataset_path: ${data.path_h5p}    # episodes come from the training data as in LeWAM
-  inference_type: "gradient_based"  # direct_policy | best-of-K | gradient_based
-  num_eval: 50                      # nb of episodes (= nb of envs)
+  inference_type: "gradient_based"  # direct_policy | persistent_direct_policy | best-of-K | gradient_based
+  num_eval: 200                     # nb of episodes (= nb of envs)
   exec_actions: 5                   # actions executed before replanning (<= 5 for direct_policy)
   img_size: 224
   random_start: True                # False : start at frame 0 of the episodes (long horizon protocol)
   min_episode_len: 0                # only episodes at least this long, 0 = no filter
-  video: True
+  video: True                       # swm keeps every frame of every env in RAM until the end (heavy at long horizon)
+  out_dir: null                     # results.txt, result.json, videos (null : outputs/eval/<task>/<inference_type>)
+  tag: null                         # name of this benchmark in summary_csv (null : inference_type)
+  summary_csv: null                 # if set, one line per benchmark is appended to this csv

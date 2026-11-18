@@ -65,6 +65,7 @@ class leWAM(nn.Module):
         goal_dim_res = cfg.emb_dims[1] if self.is_h else emb_dim
         self.goal_proj = nn.Linear(goal_dim_res, emb_dim)
         self.hist_pos = nn.Parameter(torch.zeros(1, 2, emb_dim))     # zeros as LeWAM
+        self.next_state_pos = nn.Parameter(torch.zeros(1, 1, emb_dim))
         self.action_pos = nn.Parameter(torch.zeros(1, 10, emb_dim))
         self.state_type = nn.Parameter(torch.randn(3, emb_dim))      # 0 history, 1 next state, 2 goal    the 2 = type_emb[1] if is_h
         self.action_type = nn.Parameter(torch.randn(2, emb_dim))     # 0 clean, 1 noisy
@@ -82,11 +83,11 @@ class leWAM(nn.Module):
         match type:
             case "full":
                 h = self.hist_proj(z_history) + self.hist_pos + self.state_type[0]     # (B, 2, z_dim)
-                n = z_next + self.state_type[1]                                        # (B, 1, z_dim)
-                g = self.goal_proj(z_goal)
+                n = z_next + self.next_state_pos + self.state_type[1]
+                g = z_goal
                 if tau_y is not None:
                     g = (1 - tau_y) * torch.randn_like(g) + tau_y * g
-                g = g + self.state_type[2]
+                g = self.goal_proj(g) + self.state_type[2]
                 clean = z_action[:, :5] + self.action_pos[:, :5] + self.action_type[0] # (B, 5, z_dim)
                 noisy = z_action[:, 5:] + self.action_pos + self.action_type[1]        # (B, 10, z_dim)
                 return torch.cat([h, n, g, clean, noisy], dim=1)                       # (B, 19, z_dim)
@@ -96,11 +97,11 @@ class leWAM(nn.Module):
                 return torch.cat([clean, noisy], dim=1)
             case "images":
                 h = self.hist_proj(z_history) + self.hist_pos + self.state_type[0]
-                n = z_next + self.state_type[1]
-                g = self.goal_proj(z_goal)
+                n = z_next + self.next_state_pos + self.state_type[1]
+                g = z_goal
                 if tau_y is not None:
                     g = (1 - tau_y) * torch.randn_like(g) + tau_y * g
-                g = g + self.state_type[2]
+                g = self.goal_proj(g) + self.state_type[2]
                 return torch.cat([h, n, g], dim=1)
 
 # ------------------------------- Forward -------------------------------
@@ -318,7 +319,7 @@ class leWAM(nn.Module):
         actions = []
         zero_mask = attn_mask(torch.zeros(B, 2, dtype=torch.bool, device=z_history.device), self.mask)
         for i in range(n_step):
-            h = (h_norm - i / self.h_max).clamp(min=0.1)
+            h = (h_norm - i / self.h_max).clamp(min=1/self.h_max)
             m = mask if i == 0 else zero_mask # passed first iter theres aren't any padding left 
 
             image_tokens = self.predictor_adaptor(z_history, z_goal, z_next, None, "images")
@@ -398,7 +399,7 @@ class leWAM(nn.Module):
                 z_pred = None
                 preds = [] # keep the predictions to get the cost
                 for j in range(n_steps):
-                    h = (h_norm - j / self.h_max).clamp(min=0.1)
+                    h = (h_norm - j / self.h_max).clamp(min=1/self.h_max)
                     m = mask if j == 0 else zero_mask # passed first iter theres aren't any padding left 
 
                     # cat predicted actions to zeros, because we only need the next chunk

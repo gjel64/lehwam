@@ -14,7 +14,7 @@ class HLayer(nn.Module):
         """
         super().__init__()
 
-        self.encoder = HEncoder(emb_dim, below_dim, cfg.dropout_p, cfg.enc_depth)
+        self.encoder = HEncoder(emb_dim, below_dim, cfg.enc_dropout_p, cfg.enc_depth)
         self.predictor = MoT(emb_dim, emb_dim, cfg.n_head, 3, cfg.n_block, cfg.dropout_p, True) # as for h layers there is 3 state 
 
         self.next_state_query = nn.Parameter(torch.randn(1, 1, emb_dim) * 0.02)
@@ -64,10 +64,12 @@ class HLayer(nn.Module):
 
         # ---- Construction of token 
         # y
-        tau_y = (0.7 + 0.3 * torch.rand(B, device=z.device))[:, None, None]
-        g = self.descender_proj(z_goal_above.detach())
-        eps_y = torch.randn_like(g)
-        y = (1 - tau_y) * eps_y + tau_y * g
+        if self.training:
+            tau_y = (0.7 + 0.3 * torch.rand(B, device=z.device))[:, None, None]
+        else:
+            tau_y = 1 # on eval : no noise
+        z_g = z_goal_above.detach()
+        y = self.descender_proj((1 - tau_y) * torch.randn_like(z_g) + tau_y * z_g)
 
         # x
         tau_x = torch.rand(B, device=z.device)

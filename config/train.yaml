@@ -22,6 +22,7 @@ model:
   n_head: 4
   n_block: 4
   dropout_p: 0.1
+  enc_dropout_p: 0.0
   enc_depth: 3 # encoder depth on
   z_below_detach: False # !TEST! -> if True z_below is detach on encoding
   planning:

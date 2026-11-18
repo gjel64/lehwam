@@ -1,12 +1,12 @@
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 import numpy as np
 import math
 from functools import partial
 from contextlib import nullcontext
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import os
 
 from src.data.data import DatasetLeHWAM
@@ -29,7 +29,9 @@ def train(cfg : DictConfig):
     # --- Load dataset
     assert len(data_cfg.Ks) == len(model_cfg.emb_dims) # need the same number of layers 
     ds = DatasetLeHWAM(data_cfg.path_h5p, data_cfg.path_npy, stride=5, Ks=data_cfg.Ks)
-    val_ds, train_ds = random_split(ds, [data_cfg.eval_part, 1-data_cfg.eval_part], generator=torch.Generator().manual_seed(train_cfg.seed)) # first eval 10 then train 90 as in LeWAM
+    train_idx, val_idx = ds.split_episodes(data_cfg.eval_part, train_cfg.seed) # whole episodes in eval (not random frames as LeWAM)
+    train_ds, val_ds = Subset(ds, train_idx), Subset(ds, val_idx)
+    print(f"[LOG]: {len(train_idx)} train / {len(val_idx)} eval samples ({data_cfg.eval_part:.0%} of the episodes in eval)")
     kw = dict(batch_size=train_cfg.batch_size, num_workers=data_cfg.num_workers, pin_memory=(device.type=="cuda"), 
               persistent_workers=(data_cfg.num_workers != 0), prefetch_factor=4 if data_cfg.num_workers != 0 else None)
     train_loader = DataLoader(train_ds, shuffle=True, **kw)
@@ -62,6 +64,7 @@ def train(cfg : DictConfig):
     current_loss = None
 
     # if we start with a checkpoint
+    os.makedirs(data_cfg.ckpt_path, exist_ok=True)
     start_epoch, path = 0, data_cfg.ckpt_path + "latest.pt"
     if train_cfg.resume and os.path.exists(path):
         s = torch.load(path, map_location=device)
@@ -69,6 +72,13 @@ def train(cfg : DictConfig):
         optimizer.load_state_dict(s["optimizer"])
         scheduler.load_state_dict(s["scheduler"])
         start_epoch, best_loss, logs = s["epoch"] + 1, s["best_loss"], s["logs"]
+
+    def plot(): # <ckpt_path>/plots/train.png
+        try:
+            from scripts.plot import plot_train
+            plot_train(logs, f"{data_cfg.ckpt_path}plots/train.png", f"{os.path.basename(os.path.normpath(data_cfg.ckpt_path))} · Ks {list(data_cfg.Ks)}", list(data_cfg.Ks))
+        except Exception as e: # a plot never stops the training
+            print(f"[LOG]: plot failed ({e!r})")
 
     print(f"[LOG]: Training starts ------------")
     for i in range(start_epoch, train_cfg.epochs):
@@ -91,7 +101,7 @@ def train(cfg : DictConfig):
             logs["t_loss"][i].append(losses["total"].item())
             logs["t_sigreg"][i].append([x.item() for x in losses["SIGReg"]])
             logs["t_mse"][i].append([x.item() for x in losses["MSE"]])
-            logs["t_zstd"][i].append(losses["zstd"].item())
+            logs["t_zstd"][i].append([x.item() for x in losses["zstd"]])
             logs["t_n"][i].append(frames.shape[0])
 
         # --- Evaluation
@@ -108,20 +118,22 @@ def train(cfg : DictConfig):
                 logs["e_loss"][i].append(losses["total"].item())
                 logs["e_sigreg"][i].append([x.item() for x in losses["SIGReg"]])
                 logs["e_mse"][i].append([x.item() for x in losses["MSE"]])
-                logs["e_zstd"][i].append(losses["zstd"].item())
+                logs["e_zstd"][i].append([x.item() for x in losses["zstd"]])
                 logs["e_n"][i].append(frames.shape[0])
 
-        # Check if collapse
-        e_zstd = float(np.average(logs["e_zstd"][i], weights=logs["e_n"][i]))
-        if i + 1 >= 5 and e_zstd < 0.005:
-            print(f"[LOG]: COLLAPSE zstd={e_zstd:.6f} at epoch {i}")
+        # Check if collapse : of any level (a collapsed level above gives a constant goal to the levels below)
+        e_zstd = np.average(logs["e_zstd"][i], axis=0, weights=logs["e_n"][i]).reshape(-1) # (n+1,) one per level
+        if i + 1 >= 5 and e_zstd.min() < 0.005:
+            print(f"[LOG]: COLLAPSE zstd={e_zstd.min():.6f} of level {int(e_zstd.argmin())} at epoch {i}")
+            plot() # this epoch is on the plot, not in the ckpts (a collapsed level has a low MSE : never best.pt)
             break
 
         logs["lr"][i] = [optimizer.param_groups[0]["lr"]] # as there is only 1 lr
 
-        # save if best
+        # save if best : sum of the eval MSE of every level (state + flow), the whole policy is used at inference
+        # (LeWAM : the action MSE only, which ignores the levels above). SIGReg is a regularizer, not a quality.
         e_mse = np.average(logs["e_mse"][i], axis=0, weights=logs["e_n"][i]) # weigth on batch sizes as leWAM
-        current_loss = float(e_mse[1]) # MSE action as leWAM
+        current_loss = float(e_mse.sum())
         if current_loss < best_loss:
             torch.save({"model": model.state_dict(), 
                         "eval_loss":current_loss, 
@@ -130,7 +142,8 @@ def train(cfg : DictConfig):
                         "epoch":i, 
                         "h_max": ds.h_max, 
                         "Ks": list(data_cfg.Ks),
-                        "h_top" : ds.h_top}, data_cfg.ckpt_path + "best.pt")
+                        "h_top" : ds.h_top,
+                        "model_cfg": OmegaConf.to_container(model_cfg, resolve=True)}, data_cfg.ckpt_path + "best.pt") # architecture, for benchmark.py
             best_loss = current_loss
 
         scheduler.step()
@@ -148,8 +161,10 @@ def train(cfg : DictConfig):
                     "action_std": ds.std, 
                     "h_max": ds.h_max, 
                     "Ks": list(data_cfg.Ks),
-                    "h_top" : ds.h_top},
+                    "h_top" : ds.h_top,
+                    "model_cfg": OmegaConf.to_container(model_cfg, resolve=True)},
                     f"{data_cfg.ckpt_path}latest.pt")
+        plot() # before the Epoch line : train_all.sh may stop the run right after it
         print(f"[LOG]: Epoch {i} | train_loss: {train_loss} | eval_loss: {eval_loss} | lr {logs['lr'][i][0]}")
 
     # --- End

@@ -8,6 +8,7 @@ numpy==2.5.4
 h5py==3.16.0
 hdf5plugin==7.1.0 
 hydra-core==1.4.0rc3
+matplotlib              # plots of the runs (scripts/plot.py)
 
 # --- benchmark (as LeWAM)
 stable-worldmodel==0.1.1

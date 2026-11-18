@@ -11,11 +11,16 @@ Goal-reaching benchmark of a leHWAM checkpoint (or an old leWAM one), same proto
     for s in 42 0 1; do python scripts/benchmark.py seed=$s; done           # 50 episodes x 3 seeds as the paper
 
 long horizon (as LeWAM) : eval.random_start=False eval.min_episode_len=101 eval.exec_actions=25 task.goal_offset_steps=H task.eval_budget=2H
-results (txt + videos) in outputs/eval/<task>/<inference_type>/
+results (results.txt, result.json, videos) in eval.out_dir (default outputs/eval/<task>/<inference_type>/),
++ one line in eval.summary_csv if set (scripts/train_all.sh : checkpoints/results.csv)
+the architecture (model.* except model.planning) is read from the ckpt when it has it (train.py saves model_cfg)
 """
 
+import csv
+import json
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -97,13 +102,17 @@ def benchmark(cfg : DictConfig):
     s = torch.load(ROOT / cfg.data.ckpt_path / f"{eval_cfg.ckpt}.pt", map_location=device)
     Ks, h_max = list(s.get("Ks", OLD_KS)), s.get("h_max", OLD_H_MAX) # same as the training
     stride = Ks[0] # K^0, frameskip of LeWAM
-    model = leHWAM(cfg.model, len(s["action_mean"]), device, Ks, h_max).to(device)
+    model_cfg = cfg.model
+    if "model_cfg" in s: # architecture of the training (a wrong n_head would load silently), planning params of this eval
+        model_cfg = OmegaConf.merge(OmegaConf.create(s["model_cfg"]), {"planning": cfg.model.planning})
+    model = leHWAM(model_cfg, len(s["action_mean"]), device, Ks, h_max).to(device)
     if any(k.startswith("lewam.") for k in s["model"]):
         model.load_state_dict(s["model"])
     else: # old leWAM ckpt : its weights are the LeWAM of leHWAM
         model.lewam.load_state_dict(s["model"])
     model.eval().requires_grad_(False) # gradient_based only needs grads on the actions
-    print(f"[LOG]: {eval_cfg.ckpt}.pt loaded (epoch {s['epoch']}) | Ks {Ks} | h_max {h_max}")
+    print(f"[LOG]: {eval_cfg.ckpt}.pt loaded (epoch {s['epoch']}) | Ks {Ks} | h_max {h_max} | emb_dims {list(model_cfg.emb_dims)}"
+          + ("" if "model_cfg" in s else " (architecture from the config : no model_cfg in this ckpt)"))
 
     # --- Episodes (from the training data as LeWAM)
     dataset = get_dataset(ROOT / eval_cfg.dataset_path, list(task_cfg.keys_to_cache))
@@ -123,7 +132,10 @@ def benchmark(cfg : DictConfig):
     world.set_policy(policy)
 
     # --- Evaluation
-    results_path = ROOT / "outputs" / "eval" / task_cfg.name / eval_cfg.inference_type
+    if eval_cfg.get("out_dir"):
+        results_path = ROOT / eval_cfg.out_dir # ROOT / an absolute path = the absolute path
+    else:
+        results_path = ROOT / "outputs" / "eval" / task_cfg.name / eval_cfg.inference_type
     results_path.mkdir(parents=True, exist_ok=True)
 
     print(f"[LOG]: Benchmark starts ------------ {task_cfg.name} | {eval_cfg.inference_type} | {eval_cfg.num_eval} episodes")
@@ -145,6 +157,44 @@ def benchmark(cfg : DictConfig):
         f.write("\n==== CONFIG ====\n")
         f.write(OmegaConf.to_yaml(cfg))
         f.write(f"\n==== RESULTS ({eval_cfg.inference_type}) ====\nmetrics: {metrics}\ntime: {wall:.1f}s\n")
+
+    # --- Save (one row : result.json in out_dir + one line in summary_csv)
+    row = {
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "run": Path(cfg.data.ckpt_path).name,                 # checkpoints/<run>/
+        "bench": eval_cfg.get("tag") or eval_cfg.inference_type,
+        "success_rate": round(float(metrics["success_rate"]), 2),
+        "data": Path(eval_cfg.dataset_path).stem,             # pusht125 / pusht200
+        "ckpt": eval_cfg.ckpt,
+        "epoch": s["epoch"],
+        "Ks": " ".join(map(str, Ks)),
+        "emb_dims": " ".join(map(str, model_cfg.emb_dims)),
+        "inference_type": eval_cfg.inference_type,
+        "goal_offset_steps": task_cfg.goal_offset_steps,
+        "eval_budget": task_cfg.eval_budget,
+        "exec_actions": eval_cfg.exec_actions,
+        "random_start": eval_cfg.random_start,
+        "num_eval": eval_cfg.num_eval,
+        "seed": cfg.seed,
+        "time_s": round(wall, 1),
+    }
+    to_list = lambda o: o.tolist() if hasattr(o, "tolist") else str(o) # numpy arrays of metrics (episode_successes, seeds)
+    with (results_path / "result.json").open("w") as f:
+        json.dump({**row, "metrics": metrics, "config": OmegaConf.to_container(cfg, resolve=True)}, f, indent=1, default=to_list)
+    if eval_cfg.get("summary_csv"):
+        summary = ROOT / eval_cfg.summary_csv
+        summary.parent.mkdir(parents=True, exist_ok=True)
+        new = not summary.exists() or summary.stat().st_size == 0
+        with summary.open("a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(row))
+            if new:
+                w.writeheader()
+            w.writerow(row)
+        try: # <run>/plots/bench.png and <root>/plots/bench.png (scripts/plot.py)
+            from scripts.plot import plot_benches
+            plot_benches(summary)
+        except Exception as e:
+            print(f"[LOG]: plot failed ({e!r})")
     print(f"[LOG]: results in {results_path}")
 
 
